@@ -15,17 +15,10 @@ use bevy::render::render_phase::{
     RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
 };
 use bevy::render::render_resource::binding_types::{sampler, texture_2d};
-use bevy::render::render_resource::{
-    AddressMode, AsBindGroup, BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries,
-    Extent3d, FilterMode, ImageDataLayout, IntoBinding, PipelineCache, PreparedBindGroup,
-    RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderStages,
-    SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-    TextureViewDescriptor,
-};
+use bevy::render::render_resource::{AddressMode, AsBindGroup, AsBindGroupError, BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BindGroupLayoutEntry, BindingType, BufferBindingType, BufferInitDescriptor, BufferUsages, Extent3d, FilterMode, ImageDataLayout, IntoBinding, OwnedBindingResource, PipelineCache, PreparedBindGroup, RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderStages, SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension, UnpreparedBindGroup};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
-use bevy::render::sync_world::{MainEntity, MainEntityHashMap, RenderEntity, SyncToRenderWorld};
-use bevy::render::texture::GpuImage;
+use bevy::render::sync_world::{MainEntity, MainEntityHashMap, RenderEntity};
+use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::render::view::{ExtractedView, RenderVisibleEntities};
 use bevy::render::{Extract, Render, RenderApp, RenderSet};
 use bevy::sprite::{
@@ -37,7 +30,9 @@ use bytemuck::{Pod, Zeroable};
 use noise_functions::modifiers::{Fbm, Frequency};
 use noise_functions::{Constant, Noise, OpenSimplex2, Sample};
 use std::mem::size_of;
+use std::num::NonZeroU64;
 use bevy::ecs::query::ROQueryItem;
+use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::sync_component::SyncComponentPlugin;
 use strum::FromRepr;
 
@@ -47,7 +42,7 @@ pub const TILE_PIXEL_SIZE: f32 = 32.0;
 
 const MAX_RENDER_MODE: u32 = 2;
 
-#[derive(Resource, Default)]
+#[derive(Resource, ExtractResource, Clone, Copy, Default)]
 pub struct TerrainRenderMode {
     pub mode: u32,
 }
@@ -56,18 +51,123 @@ const TERRAIN_SHADER_PATH: &str = "shaders/terrain_base.wgsl";
 const SUPER_PERLIN_TEXTURE_PATH: &str = "textures/sperlin_rock.png";
 const GRAINY_TEXTURE_PATH: &str = "textures/grainy.png";
 
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+#[derive(Asset, TypePath, Debug, Clone)]
 pub(crate) struct TerrainMaterial {
-    #[uniform(0)]
     mode: u32,
-
-    #[texture(1)]
-    #[sampler(2)]
     super_perlin_rock: Option<Handle<Image>>,
-
-    #[texture(3)]
-    #[sampler(4)]
     grainy_texture: Option<Handle<Image>>,
+}
+
+impl AsBindGroup for TerrainMaterial {
+    type Data = ();
+    type Param = (
+        SRes<RenderAssets<GpuImage>>,
+        SRes<FallbackImage>,
+    );
+
+    fn label() -> Option<&'static str> {
+        Some("terrain_material")
+    }
+
+    fn unprepared_bind_group(
+        &self,
+        _layout: &BindGroupLayout,
+        render_device: &RenderDevice,
+        (images, fallback_image): &mut SystemParamItem<'_, '_, Self::Param>,
+    ) -> Result<UnpreparedBindGroup<Self::Data>, AsBindGroupError> {
+        let mut bindings = Vec::new();
+
+        // Add uniform binding
+        bindings.push((0, OwnedBindingResource::Buffer(render_device.create_buffer_with_data(
+            &BufferInitDescriptor {
+                label: Some("terrain_material_uniform_buffer"),
+                contents: bytemuck::cast_slice(&[self.mode]),
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            }
+        ))));
+
+        // insert fallible texture-based entries at 0 so that if we fail here, we exit before allocating any buffers
+        bindings.push((1, OwnedBindingResource::TextureView({
+            if let Some(texture_handle) = &self.super_perlin_rock {
+                images.get(texture_handle)
+                    .ok_or_else(|| AsBindGroupError::RetryNextUpdate)?.texture_view.clone()
+            } else {
+                fallback_image.d2.texture_view.clone()
+            }
+        })));
+
+        bindings.push((2, OwnedBindingResource::TextureView({
+            if let Some(texture_handle) = &self.grainy_texture {
+                images.get(texture_handle)
+                    .ok_or_else(|| AsBindGroupError::RetryNextUpdate)?.texture_view.clone()
+            } else {
+                fallback_image.d2.texture_view.clone()
+            }
+        })));
+
+        // 创建一个自定义的sampler，在UV方向上使用Repeat模式，并使用双线性插值
+        let custom_sampler = render_device.create_sampler(&SamplerDescriptor {
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            address_mode_w: AddressMode::Repeat, // 虽然在2D中不使用，但设置它是个好习惯
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // 使用自定义sampler而不是fallback_image的sampler
+        bindings.push((3, OwnedBindingResource::Sampler(custom_sampler)));
+
+        Ok(UnpreparedBindGroup {
+            bindings,
+            data: (),
+        })
+    }
+
+    fn bind_group_layout_entries(_render_device: &RenderDevice) -> Vec<BindGroupLayoutEntry> {
+        vec![
+            // Uniform buffer
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(NonZeroU64::new(4).unwrap()),
+                },
+                count: None,
+            },
+            // Texture bindings
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: true },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: true },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // Sampler bindings
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                count: None,
+            },
+        ]
+    }
 }
 
 #[derive(Resource)]
@@ -98,21 +198,52 @@ pub fn extract_terrain_chunk(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     mut data_store: ResMut<TerrainPerChunkDataStore>,
-    query: Extract<Query<(Entity, &RenderEntity, &TerrainChunk)>>,
+    query: Extract<Query<(Entity, &RenderEntity, &TerrainChunk, Option<&TerrainChunkChanged>)>>,
 ) {
     trace!("Extracting terrain chunks");
-    for (entity, render_entity, terrain_chunk) in &query {
+    for (entity, render_entity, terrain_chunk, changed) in &query {
         commands.entity(render_entity.id()).insert(TerrainChunkGpuMarker{});
+        
+        let main_entity = MainEntity::from(entity);
 
-        // Skip if we already have data for this chunk
-        if data_store.contains_key(&MainEntity::from(entity)) {
+        // 判断是否需要创建或更新
+        let needs_update = changed.is_some() || !data_store.contains_key(&main_entity);
+        
+        // 如果不需要更新则跳过
+        if !needs_update {
             continue;
         }
 
-        // Convert terrain data to texture format
+        // 转换地形数据为纹理格式
         let image_data: Vec<u8> = bytemuck::cast_slice(&terrain_chunk.data).to_vec();
+        let format_size = size_of::<TerrainCell>();
 
-        // Create texture descriptor
+        // 如果已存在数据则更新现有纹理，否则创建新的
+        if changed.is_some() && data_store.contains_key(&main_entity) {
+            // 获取已有的GPU图像
+            if let Some(data) = data_store.get_mut(&main_entity) {
+                // 更新现有纹理
+                render_queue.write_texture(
+                    data.terrain_map_gpu_image.texture.as_image_copy(),
+                    &image_data,
+                    ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(ISLAND_CHUNK_SIZE * format_size as u32),
+                        rows_per_image: None,
+                    },
+                    Extent3d {
+                        width: ISLAND_CHUNK_SIZE,
+                        height: ISLAND_CHUNK_SIZE,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                
+                trace!("Updated existing terrain chunk texture for entity: {:?}", entity);
+                continue;
+            }
+        }
+
+        // 创建纹理描述符
         let texture_descriptor = TextureDescriptor {
             label: Some("terrain_chunk_texture"),
             size: Extent3d {
@@ -128,7 +259,7 @@ pub fn extract_terrain_chunk(
             view_formats: &[],
         };
 
-        // Create GPU image directly
+        // 创建GPU图像
         let gpu_image = {
             // Create texture
             let texture = render_device.create_texture(&texture_descriptor);
@@ -312,22 +443,20 @@ pub struct TerrainCell {
 #[derive(Component, Clone, Debug)]
 pub struct TerrainChunkGpuMarker;
 
+/// 标记地形块已更改，需要更新GPU纹理数据
+#[derive(Component, Clone, Debug, Default)]
+#[component(storage = "SparseSet")]
+pub struct TerrainChunkChanged;
+
 #[derive(Component, Clone, Debug)]
 pub struct TerrainChunk {
-    center_position: Vec2,
     data: Vec<TerrainCell>,
 }
 
-pub fn spawn_tilemap(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    noise_source: Res<NoiseSource<Frequency<Fbm<OpenSimplex2>, Constant>>>,
+pub fn generate_tiles(
+    chunk_data: &mut Vec<TerrainCell>, 
+    noise_source: &NoiseSource<Frequency<Fbm<OpenSimplex2>, Constant>>,
 ) {
-    trace!("Spawning tilemap with chunk size: {}", ISLAND_CHUNK_SIZE);
-    let mut chunk_data =
-        vec![TerrainCell::default(); (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
-
-    // let mut image_data = vec![0u8; (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
     let center = vec2(
         ISLAND_CHUNK_SIZE as f32 / 2.0f32,
         ISLAND_CHUNK_SIZE as f32 / 2.0f32,
@@ -390,7 +519,7 @@ pub fn spawn_tilemap(
                     + 0.5;
                 
                 // Determine if this is a coastal area (near sea level)
-                let is_coastal = height > SEA_LEVEL - 5.0 && height < SEA_LEVEL + 5.0;
+                let is_coastal = height > SEA_LEVEL - 5.0 && height < SEA_LEVEL + 10.0;
                 
                 // Determine base type
                 let base_type = if is_coastal {
@@ -445,6 +574,18 @@ pub fn spawn_tilemap(
             }
         },
     );
+}
+
+pub fn spawn_tilemap(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    noise_source: Res<NoiseSource<Frequency<Fbm<OpenSimplex2>, Constant>>>,
+) {
+    trace!("Spawning tilemap with chunk size: {}", ISLAND_CHUNK_SIZE);
+    let mut chunk_data =
+        vec![TerrainCell::default(); (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
+
+    generate_tiles(&mut chunk_data, noise_source.into_inner());
 
     commands.spawn((
         Mesh2d(meshes.add(Rectangle::new(
@@ -452,7 +593,6 @@ pub fn spawn_tilemap(
             ISLAND_CHUNK_SIZE as f32,
         ))),
         TerrainChunk {
-            center_position: vec2(0.0, 0.0),
             data: chunk_data,
         },
     ));
@@ -469,24 +609,37 @@ fn switch_render_mode(
     }
 }
 
-// Extract the render mode to the render world
-fn extract_terrain_render_mode(
-    render_mode: Extract<Res<TerrainRenderMode>>,
-    mut render_app_render_mode: ResMut<TerrainRenderMode>,
-) {
-    trace!("Extracting terrain render mode: {}", render_mode.mode);
-    render_app_render_mode.mode = render_mode.mode;
-}
-
 // Update the material in the render world based on the extracted render mode
-fn update_terrain_material(
+fn update_render_mode(
     render_mode: Res<TerrainRenderMode>,
-    terrain_pipeline: Res<TerrainPipeline>,
+    mut terrain_pipeline: ResMut<TerrainPipeline>,
+    render_queue: Res<RenderQueue>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
 ) {
     trace!("Updating terrain material with render mode: {}", render_mode.mode);
     if let Some(material) = materials.get_mut(terrain_pipeline.terrain_material.id()) {
+        // 更新材质的mode
         material.mode = render_mode.mode;
+        
+        // 如果material_bind_group已存在，更新其中的uniform buffer
+        if let Some(prepared_bind_group) = &mut terrain_pipeline.material_bind_group {
+            // 查找索引0的binding (uniform buffer)
+            for (binding_index, binding_resource) in &prepared_bind_group.bindings {
+                if *binding_index == 0 {
+                    // 找到了uniform buffer
+                    if let OwnedBindingResource::Buffer(buffer) = binding_resource {
+                        // 直接写入新的mode值到现有buffer
+                        render_queue.write_buffer(
+                            buffer,
+                            0,  // 偏移量为0
+                            bytemuck::cast_slice(&[material.mode])
+                        );
+                        trace!("Updated terrain material uniform buffer with new mode: {}", material.mode);
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -606,6 +759,7 @@ impl Plugin for Terrain2dPlugin {
             .frequency(2.4 / ISLAND_CHUNK_SIZE as f32);
 
         app.add_plugins(SyncComponentPlugin::<TerrainChunk>::default());
+        app.add_plugins(ExtractResourcePlugin::<TerrainRenderMode>::default());
 
         app.insert_resource(NoiseSource { noise: fbm })
             .init_resource::<TerrainRenderMode>()
@@ -624,14 +778,13 @@ impl Plugin for Terrain2dPlugin {
                     ExtractSchedule,
                     (
                         extract_terrain_chunk,
-                        extract_terrain_render_mode,
                         extract_terrain_mesh2d.after(extract_mesh2d),
                     ),
                 )
                 .add_systems(
                     Render,
                     (
-                        update_terrain_material.in_set(RenderSet::PrepareBindGroups),
+                        update_render_mode,
                         bind_terrain_material.in_set(RenderSet::PrepareBindGroups),
                         prepare_terrain_bind_group.in_set(RenderSet::PrepareBindGroups),
                         queue_terrain_mesh2d.in_set(RenderSet::QueueMeshes),
