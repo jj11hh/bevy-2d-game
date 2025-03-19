@@ -41,7 +41,7 @@ use bevy::ecs::query::ROQueryItem;
 use bevy::render::sync_component::SyncComponentPlugin;
 use strum::FromRepr;
 
-const ISLAND_CHUNK_SIZE: u32 = 128; // We will finally reach 512
+const ISLAND_CHUNK_SIZE: u32 = 256; // We will finally reach 512
 
 pub const TILE_PIXEL_SIZE: f32 = 32.0;
 
@@ -332,6 +332,16 @@ pub fn spawn_tilemap(
         ISLAND_CHUNK_SIZE as f32 / 2.0f32,
         ISLAND_CHUNK_SIZE as f32 / 2.0f32,
     );
+    
+    // Create a second noise source for terrain base type with different frequency
+    let base_noise = OpenSimplex2
+        .fbm(3, 0.6, 2.2)
+        .frequency(1.8 / ISLAND_CHUNK_SIZE as f32);
+        
+    // Create a noise source for island shape irregularity
+    let shape_noise = OpenSimplex2
+        .fbm(4, 0.7, 2.0)
+        .frequency(3.0 / ISLAND_CHUNK_SIZE as f32);
 
     chunk_data.par_chunk_map_mut(
         ComputeTaskPool::get(),
@@ -342,23 +352,96 @@ pub fn spawn_tilemap(
                 let x = index % (ISLAND_CHUNK_SIZE as usize);
                 let y = index / (ISLAND_CHUNK_SIZE as usize);
                 let position = vec2(x as f32, y as f32) - center;
+                
+                // Height noise
                 let noise = noise_source
                     .noise
                     .sample_with_seed([position.x, position.y], RANDOM_SEED as i32)
                     * 0.5
                     + 0.5;
-                let distance_from_center = position.length();
-                let height_scale =
-                    1.0 - (distance_from_center / (ISLAND_CHUNK_SIZE as f32 * 0.5)).powf(2.0);
+                
+                // Get shape noise to create irregular island shape
+                let shape_noise_value = shape_noise
+                    .sample_with_seed([position.x, position.y], (RANDOM_SEED + 123) as i32)
+                    * 0.5
+                    + 0.5;
+                
+                // Perturb the distance calculation with noise to create irregular coastline
+                let angle = position.y.atan2(position.x);
+                let noise_factor = 0.3; // Controls how irregular the coastline is
+                let distance_perturbation = (shape_noise_value - 0.5) * noise_factor;
+                
+                // Calculate distance with perturbation
+                let distance_from_center = position.length() * (1.0 + distance_perturbation);
+                
+                // Use a different exponent to create more varied island shape
+                let height_scale = 1.0 - (distance_from_center / (ISLAND_CHUNK_SIZE as f32 * 0.5)).powf(1.8);
+                
+                // Apply additional shape variation based on angle
+                let angular_variation = (angle * 4.0).sin() * 0.1;
+                let height_scale = (height_scale + angular_variation).max(0.0);
+                
                 let height = height_scale * noise * HEIGHT_LIMIT;
+                
+                // Base type noise
+                let base_noise_value = base_noise
+                    .sample_with_seed([position.x, position.y], (RANDOM_SEED + 42) as i32)
+                    * 0.5
+                    + 0.5;
+                
+                // Determine if this is a coastal area (near sea level)
+                let is_coastal = height > SEA_LEVEL - 5.0 && height < SEA_LEVEL + 5.0;
+                
+                // Determine base type
+                let base_type = if is_coastal {
+                    // Coastal areas are always sandy beaches
+                    TerrainBase::Sand
+                } else if height <= SEA_LEVEL {
+                    // Underwater areas - mix of sand and mud
+                    if base_noise_value < 0.4 {
+                        TerrainBase::Sand
+                    } else {
+                        TerrainBase::Mud
+                    }
+                } else {
+                    // Land areas - mix of rock and soil based on noise and height
+                    if height > SEA_LEVEL + 50.0 || base_noise_value > 0.7 {
+                        TerrainBase::Rock // Higher elevations and some random areas are rocky
+                    } else {
+                        TerrainBase::Soil // Most land is soil
+                    }
+                };
+
+                // Determine surface type
+                let surface_type = if height <= SEA_LEVEL {
+                    // Underwater is always water
+                    TerrainSurface::Water
+                } else {
+                    // Land areas - determine surface based on height and noise
+                    let elevation_percent = (height - SEA_LEVEL) / (HEIGHT_LIMIT - SEA_LEVEL);
+                    
+                    // Use base_noise to add variation to surface type boundaries
+                    let surface_noise = base_noise_value;
+                    
+                    if elevation_percent > 0.7 || (elevation_percent > 0.6 && surface_noise > 0.6) {
+                        // High elevations get snow
+                        TerrainSurface::Snow
+                    } else if elevation_percent < 0.3 || (elevation_percent < 0.4 && surface_noise < 0.4) {
+                        // Lower elevations get grass (except beaches which are handled by base type)
+                        if !is_coastal {
+                            TerrainSurface::Grass
+                        } else {
+                            TerrainSurface::Bare // Beaches remain bare
+                        }
+                    } else {
+                        // Middle elevations are bare
+                        TerrainSurface::Bare
+                    }
+                };
 
                 item.height = height as u8;
-                item.base_type = TerrainBase::Rock as u8;
-                item.surface_type = if height > SEA_LEVEL {
-                    TerrainSurface::Bare
-                } else {
-                    TerrainSurface::Water
-                } as u8;
+                item.base_type = base_type as u8;
+                item.surface_type = surface_type as u8;
             }
         },
     );
