@@ -201,11 +201,16 @@ pub fn extract_terrain_chunk(
     query: Extract<Query<(Entity, &RenderEntity, &TerrainChunk, Option<&TerrainChunkChanged>)>>,
 ) {
     trace!("Extracting terrain chunks");
+    
+    // 收集当前存在的实体以便清理不再存在的数据
+    let mut active_entities = Vec::new();
+    
     for (entity, render_entity, terrain_chunk, changed) in &query {
         commands.entity(render_entity.id()).insert(TerrainChunkGpuMarker{});
         
         let main_entity = MainEntity::from(entity);
-
+        active_entities.push(main_entity);
+        
         // 判断是否需要创建或更新
         let needs_update = changed.is_some() || !data_store.contains_key(&main_entity);
         
@@ -309,6 +314,19 @@ pub fn extract_terrain_chunk(
                 terrain_map_gpu_image: gpu_image,
             },
         );
+    }
+    
+    // 清理已经不存在的实体的数据
+    let mut to_remove = Vec::new();
+    for entity_key in data_store.keys() {
+        if !active_entities.contains(entity_key) {
+            to_remove.push(*entity_key);
+        }
+    }
+    
+    for entity_key in to_remove {
+        trace!("Removing terrain chunk data for destroyed entity: {:?}", entity_key);
+        data_store.remove(&entity_key);
     }
 }
 
