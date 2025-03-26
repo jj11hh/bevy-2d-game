@@ -51,9 +51,33 @@ const TERRAIN_SHADER_PATH: &str = "shaders/terrain_base.wgsl";
 const SUPER_PERLIN_TEXTURE_PATH: &str = "textures/sperlin_rock.png";
 const GRAINY_TEXTURE_PATH: &str = "textures/grainy.png";
 
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[repr(C)]
+pub struct TerrainMaterialUniform {
+    pub mode: u32,
+    pub padding: [u32; 3], // Padding to ensure alignment
+    pub time_x: f32, // time
+    pub time_y: f32, // delta_time
+    pub time_z: f32, // sin(time)
+    pub time_w: f32, // cos(time)
+}
+
+impl Default for TerrainMaterialUniform {
+    fn default() -> Self {
+        Self {
+            mode: 0,
+            padding: [0; 3],
+            time_x: 0.0,
+            time_y: 0.0,
+            time_z: 0.0,
+            time_w: 0.0,
+        }
+    }
+}
+
 #[derive(Asset, TypePath, Debug, Clone)]
 pub(crate) struct TerrainMaterial {
-    mode: u32,
+    pub material_uniform: TerrainMaterialUniform,
     super_perlin_rock: Option<Handle<Image>>,
     grainy_texture: Option<Handle<Image>>,
 }
@@ -81,7 +105,7 @@ impl AsBindGroup for TerrainMaterial {
         bindings.push((0, OwnedBindingResource::Buffer(render_device.create_buffer_with_data(
             &BufferInitDescriptor {
                 label: Some("terrain_material_uniform_buffer"),
-                contents: bytemuck::cast_slice(&[self.mode]),
+                contents: bytemuck::cast_slice(&[self.material_uniform]),
                 usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             }
         ))));
@@ -134,7 +158,7 @@ impl AsBindGroup for TerrainMaterial {
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: Some(NonZeroU64::new(4).unwrap()),
+                    min_binding_size: Some(NonZeroU64::new(size_of::<TerrainMaterialUniform>() as u64).unwrap()),
                 },
                 count: None,
             },
@@ -387,7 +411,7 @@ impl FromWorld for TerrainPipeline {
             material_bind_group: None,
             terrain_shader: world.load_asset(TERRAIN_SHADER_PATH),
             terrain_material: world.add_asset(TerrainMaterial {
-                mode: 0,
+                material_uniform: TerrainMaterialUniform::default(),
                 super_perlin_rock: Some(world.load_asset_with_settings(SUPER_PERLIN_TEXTURE_PATH, image_repeat_settings)),
                 grainy_texture: Some(world.load_asset_with_settings(GRAINY_TEXTURE_PATH, image_repeat_settings)),
             }),
@@ -637,22 +661,18 @@ fn update_render_mode(
     trace!("Updating terrain material with render mode: {}", render_mode.mode);
     if let Some(material) = materials.get_mut(terrain_pipeline.terrain_material.id()) {
         // 更新材质的mode
-        material.mode = render_mode.mode;
+        material.material_uniform.mode = render_mode.mode;
         
         // 如果material_bind_group已存在，更新其中的uniform buffer
         if let Some(prepared_bind_group) = &mut terrain_pipeline.material_bind_group {
-            // 查找索引0的binding (uniform buffer)
             for (binding_index, binding_resource) in &prepared_bind_group.bindings {
                 if *binding_index == 0 {
-                    // 找到了uniform buffer
                     if let OwnedBindingResource::Buffer(buffer) = binding_resource {
-                        // 直接写入新的mode值到现有buffer
                         render_queue.write_buffer(
                             buffer,
                             0,  // 偏移量为0
-                            bytemuck::cast_slice(&[material.mode])
+                            bytemuck::cast_slice(&[material.material_uniform])
                         );
-                        trace!("Updated terrain material uniform buffer with new mode: {}", material.mode);
                         break;
                     }
                 }

@@ -27,7 +27,15 @@ const SURFACE_WATER: u32 = 1;
 const SURFACE_GRASS: u32 = 2;
 const SURFACE_SNOW: u32 = 3;
 
-@group(2) @binding(0) var<uniform> render_mode: u32;
+struct TerrainMaterialUniform {
+    mode: u32,
+    padding1: u32,
+    padding2: u32,
+    padding3: u32,
+    time: vec4<f32>,
+}
+
+@group(2) @binding(0) var<uniform> terrainMaterial: TerrainMaterialUniform;
 
 @group(2) @binding(1) var super_perlin_texture: texture_2d<f32>;
 @group(2) @binding(2) var super_perlin_sampler: sampler;
@@ -183,7 +191,7 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
 
     let uv_overlay = vec4<f32>(uv_in_tile, 1.0, 1.0); // Debug UV
 
-    if render_mode != 0 {
+    if terrainMaterial.mode != 0 {
         return color + uv_overlay * 0.1;
     }
 
