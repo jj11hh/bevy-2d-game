@@ -1,55 +1,76 @@
+// External crates
 use crate::{NoiseSource, HEIGHT_LIMIT, RANDOM_SEED, SEA_LEVEL};
-use bevy::asset::Assets;
-use bevy::core_pipeline::core_2d::Transparent2d;
-use bevy::ecs::system::lifetimeless::{Read, SRes};
-use bevy::ecs::system::{StaticSystemParam, SystemParamItem};
-use bevy::image::{Image, ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
-use bevy::math::{vec2, FloatOrd};
-use bevy::pbr::MeshFlags;
-use bevy::prelude::*;
-use bevy::render::mesh::allocator::MeshAllocator;
-use bevy::render::mesh::{MeshVertexBufferLayoutRef, RenderMesh, RenderMeshBufferInfo};
-use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_phase::{
-    AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
-    RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
-};
-use bevy::render::render_resource::binding_types::{sampler, texture_2d};
-use bevy::render::render_resource::{AddressMode, AsBindGroup, AsBindGroupError, BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, BindGroupLayoutEntry, BindingType, BufferBindingType, BufferInitDescriptor, BufferUsages, Extent3d, FilterMode, ImageDataLayout, IntoBinding, OwnedBindingResource, PipelineCache, PreparedBindGroup, RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderStages, SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension, UnpreparedBindGroup};
-use bevy::render::renderer::{RenderDevice, RenderQueue};
-use bevy::render::sync_world::{MainEntity, MainEntityHashMap, RenderEntity};
-use bevy::render::texture::{FallbackImage, GpuImage};
-use bevy::render::view::{ExtractedView, RenderVisibleEntities};
-use bevy::render::{Extract, Render, RenderApp, RenderSet};
-use bevy::sprite::{
-    extract_mesh2d, Material2dBindGroupId, Mesh2dBindGroup, Mesh2dPipeline, Mesh2dPipelineKey,
-    Mesh2dTransforms, RenderMesh2dInstance, SetMesh2dViewBindGroup,
-};
-use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
 use bytemuck::{Pod, Zeroable};
-use noise_functions::modifiers::{Fbm, Frequency};
-use noise_functions::{Constant, Noise, OpenSimplex2, Sample};
-use std::mem::size_of;
-use std::num::NonZeroU64;
-use bevy::ecs::query::ROQueryItem;
-use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::sync_component::SyncComponentPlugin;
+use noise_functions::{
+    modifiers::{Fbm, Frequency},
+    Constant, Noise, OpenSimplex2, Sample,
+};
+use std::{mem::size_of, num::NonZeroU64};
 use strum::FromRepr;
 
-const ISLAND_CHUNK_SIZE: u32 = 256; // We will finally reach 512
+// Bevy imports - organized by module
+use bevy::{
+    asset::Assets,
+    core_pipeline::core_2d::Transparent2d,
+    ecs::{
+        query::ROQueryItem,
+        system::{lifetimeless::{Read, SRes}, StaticSystemParam, SystemParamItem},
+    },
+    image::{Image, ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor},
+    math::{vec2, FloatOrd},
+    pbr::MeshFlags,
+    prelude::*,
+    render::{
+        Extract, Render, RenderApp, RenderSet,
+        extract_resource::{ExtractResource, ExtractResourcePlugin},
+        mesh::{
+            allocator::MeshAllocator,
+            MeshVertexBufferLayoutRef, RenderMesh, RenderMeshBufferInfo,
+        },
+        render_asset::RenderAssets,
+        render_phase::{
+            AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
+            RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
+        },
+        render_resource::{
+            binding_types::{sampler, texture_2d},
+            AddressMode, AsBindGroup, AsBindGroupError, BindGroup, BindGroupEntries, BindGroupLayout,
+            BindGroupLayoutEntries, BindGroupLayoutEntry, BindingType, BufferBindingType,
+            BufferInitDescriptor, BufferUsages, Extent3d, FilterMode, ImageDataLayout, IntoBinding,
+            OwnedBindingResource, PipelineCache, PreparedBindGroup, RenderPipelineDescriptor,
+            SamplerBindingType, SamplerDescriptor, ShaderStages, SpecializedMeshPipeline,
+            SpecializedMeshPipelineError, SpecializedMeshPipelines, TextureDescriptor,
+            TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+            TextureViewDescriptor, TextureViewDimension, UnpreparedBindGroup,
+        },
+        renderer::{RenderDevice, RenderQueue},
+        sync_component::SyncComponentPlugin,
+        sync_world::{MainEntity, MainEntityHashMap, RenderEntity},
+        texture::{FallbackImage, GpuImage},
+        view::{ExtractedView, RenderVisibleEntities},
+    },
+    sprite::{
+        extract_mesh2d, Material2dBindGroupId, Mesh2dBindGroup, Mesh2dPipeline, Mesh2dPipelineKey,
+        Mesh2dTransforms, RenderMesh2dInstance, SetMesh2dViewBindGroup,
+    },
+    tasks::{ComputeTaskPool, ParallelSliceMut},
+};
 
+// Terrain configuration constants
+const ISLAND_CHUNK_SIZE: u32 = 256; // Size in pixels
 pub const TILE_PIXEL_SIZE: f32 = 32.0;
-
 const MAX_RENDER_MODE: u32 = 2;
 
+// Asset paths
+const TERRAIN_SHADER_PATH: &str = "shaders/terrain_base.wgsl";
+const SUPER_PERLIN_TEXTURE_PATH: &str = "textures/sperlin_rock.png";
+const GRAINY_TEXTURE_PATH: &str = "textures/grainy.png";
+
+// Resources and structs
 #[derive(Resource, ExtractResource, Clone, Copy, Default)]
 pub struct TerrainRenderMode {
     pub mode: u32,
 }
-
-const TERRAIN_SHADER_PATH: &str = "shaders/terrain_base.wgsl";
-const SUPER_PERLIN_TEXTURE_PATH: &str = "textures/sperlin_rock.png";
-const GRAINY_TEXTURE_PATH: &str = "textures/grainy.png";
 
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 #[repr(C)]
@@ -129,18 +150,17 @@ impl AsBindGroup for TerrainMaterial {
             }
         })));
 
-        // 创建一个自定义的sampler，在UV方向上使用Repeat模式，并使用双线性插值
         let custom_sampler = render_device.create_sampler(&SamplerDescriptor {
             address_mode_u: AddressMode::Repeat,
             address_mode_v: AddressMode::Repeat,
-            address_mode_w: AddressMode::Repeat, // 虽然在2D中不使用，但设置它是个好习惯
+            address_mode_w: AddressMode::Repeat,
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
             mipmap_filter: FilterMode::Linear,
             ..Default::default()
         });
 
-        // 使用自定义sampler而不是fallback_image的sampler
+        // Use custom sampler instead of fallback_image's sampler
         bindings.push((3, OwnedBindingResource::Sampler(custom_sampler)));
 
         Ok(UnpreparedBindGroup {
@@ -226,7 +246,7 @@ pub fn extract_terrain_chunk(
 ) {
     trace!("Extracting terrain chunks");
     
-    // 收集当前存在的实体以便清理不再存在的数据
+    // Collect active entities to clean up data for destroyed entities later
     let mut active_entities = Vec::new();
     
     for (entity, render_entity, terrain_chunk, changed) in &query {
@@ -235,23 +255,23 @@ pub fn extract_terrain_chunk(
         let main_entity = MainEntity::from(entity);
         active_entities.push(main_entity);
         
-        // 判断是否需要创建或更新
+        // Determine if we need to create or update
         let needs_update = changed.is_some() || !data_store.contains_key(&main_entity);
         
-        // 如果不需要更新则跳过
+        // Skip if no update needed
         if !needs_update {
             continue;
         }
 
-        // 转换地形数据为纹理格式
+        // Convert terrain data to texture format
         let image_data: Vec<u8> = bytemuck::cast_slice(&terrain_chunk.data).to_vec();
         let format_size = size_of::<TerrainCell>();
 
-        // 如果已存在数据则更新现有纹理，否则创建新的
+        // Update existing texture if data exists, otherwise create a new one
         if changed.is_some() && data_store.contains_key(&main_entity) {
-            // 获取已有的GPU图像
+            // Get existing GPU image
             if let Some(data) = data_store.get_mut(&main_entity) {
-                // 更新现有纹理
+                // Update existing texture
                 render_queue.write_texture(
                     data.terrain_map_gpu_image.texture.as_image_copy(),
                     &image_data,
@@ -272,7 +292,7 @@ pub fn extract_terrain_chunk(
             }
         }
 
-        // 创建纹理描述符
+        // Create texture descriptor
         let texture_descriptor = TextureDescriptor {
             label: Some("terrain_chunk_texture"),
             size: Extent3d {
@@ -288,7 +308,7 @@ pub fn extract_terrain_chunk(
             view_formats: &[],
         };
 
-        // 创建GPU图像
+        // Create GPU image
         let gpu_image = {
             // Create texture
             let texture = render_device.create_texture(&texture_descriptor);
@@ -340,7 +360,7 @@ pub fn extract_terrain_chunk(
         );
     }
     
-    // 清理已经不存在的实体的数据
+    // Clean up data for entities that no longer exist
     let mut to_remove = Vec::new();
     for entity_key in data_store.keys() {
         if !active_entities.contains(entity_key) {
@@ -443,6 +463,7 @@ impl SpecializedMeshPipeline for TerrainPipeline {
 #[derive(Resource, Deref, DerefMut, Default)]
 pub struct RenderTerrainMeshInstances(MainEntityHashMap<RenderMesh2dInstance>);
 
+/// Base terrain material that determines physical properties
 #[derive(Debug, PartialEq, FromRepr)]
 #[repr(u8)]
 pub enum TerrainBase {
@@ -458,6 +479,7 @@ impl Default for TerrainBase {
     }
 }
 
+/// Surface covering that determines visual appearance
 #[derive(Debug, PartialEq, FromRepr)]
 #[repr(u8)]
 pub enum TerrainSurface {
@@ -495,16 +517,21 @@ pub struct TerrainChunk {
     data: Vec<TerrainCell>,
 }
 
+/// Generates terrain data for a chunk using multiple noise sources
+///
+/// # Parameters
+/// * `chunk_data` - Vector to populate with terrain cell data
+/// * `noise_source` - Primary noise source for height generation
 pub fn generate_tiles(
-    chunk_data: &mut Vec<TerrainCell>, 
+    chunk_data: &mut Vec<TerrainCell>,
     noise_source: &NoiseSource<Frequency<Fbm<OpenSimplex2>, Constant>>,
 ) {
     let center = vec2(
-        ISLAND_CHUNK_SIZE as f32 / 2.0f32,
-        ISLAND_CHUNK_SIZE as f32 / 2.0f32,
+        ISLAND_CHUNK_SIZE as f32 / 2.0,
+        ISLAND_CHUNK_SIZE as f32 / 2.0,
     );
     
-    // Create a second noise source for terrain base type with different frequency
+    // Create specialized noise sources for different terrain features
     let base_noise = OpenSimplex2
         .fbm(3, 0.6, 2.2)
         .frequency(1.8 / ISLAND_CHUNK_SIZE as f32);
@@ -514,24 +541,26 @@ pub fn generate_tiles(
         .fbm(4, 0.7, 2.0)
         .frequency(3.0 / ISLAND_CHUNK_SIZE as f32);
 
+    // Process chunks in parallel for better performance
     chunk_data.par_chunk_map_mut(
         ComputeTaskPool::get(),
         ISLAND_CHUNK_SIZE as usize,
         |chunk_index, data| {
-            for (i, item) in data.iter_mut().enumerate() {
+            for (i, cell) in data.iter_mut().enumerate() {
+                // Calculate cell position in the chunk
                 let index = chunk_index * ISLAND_CHUNK_SIZE as usize + i;
                 let x = index % (ISLAND_CHUNK_SIZE as usize);
                 let y = index / (ISLAND_CHUNK_SIZE as usize);
                 let position = vec2(x as f32, y as f32) - center;
                 
-                // Height noise
-                let noise = noise_source
+                // Generate base height from primary noise
+                let height_noise = noise_source
                     .noise
                     .sample_with_seed([position.x, position.y], RANDOM_SEED as i32)
                     * 0.5
                     + 0.5;
                 
-                // Get shape noise to create irregular island shape
+                // Get shape noise for island edge irregularity
                 let shape_noise_value = shape_noise
                     .sample_with_seed([position.x, position.y], (RANDOM_SEED + 123) as i32)
                     * 0.5
@@ -552,7 +581,7 @@ pub fn generate_tiles(
                 let angular_variation = (angle * 4.0).sin() * 0.1;
                 let height_scale = (height_scale + angular_variation).max(0.0);
                 
-                let height = height_scale * noise * HEIGHT_LIMIT;
+                let height = height_scale * height_noise * HEIGHT_LIMIT;
                 
                 // Base type noise
                 let base_noise_value = base_noise
@@ -583,36 +612,50 @@ pub fn generate_tiles(
                     }
                 };
 
-                // Determine surface type
-                let surface_type = if height <= SEA_LEVEL {
-                    // Underwater is always water
-                    TerrainSurface::Water
-                } else {
-                    // Land areas - determine surface based on height and noise
-                    let elevation_percent = (height - SEA_LEVEL) / (HEIGHT_LIMIT - SEA_LEVEL);
+                // Determine terrain surface covering
+                let surface_type = match () {
+                    // Water covers everything underwater
+                    _ if height <= SEA_LEVEL => TerrainSurface::Water,
                     
-                    // Use base_noise to add variation to surface type boundaries
-                    let surface_noise = base_noise_value;
-                    
-                    if elevation_percent > 0.7 || (elevation_percent > 0.6 && surface_noise > 0.6) {
-                        // High elevations get snow
-                        TerrainSurface::Snow
-                    } else if elevation_percent < 0.3 || (elevation_percent < 0.4 && surface_noise < 0.4) {
-                        // Lower elevations get grass (except beaches which are handled by base type)
-                        if !is_coastal {
-                            TerrainSurface::Grass
+                    // Land areas - determine surface based on elevation and noise
+                    _ => {
+                        // Calculate relative height above sea level as percentage
+                        let land_height = height - SEA_LEVEL;
+                        let max_land_height = HEIGHT_LIMIT - SEA_LEVEL;
+                        let elevation_percent = land_height / max_land_height;
+                        
+                        // Snow caps on high mountains
+                        let snow_threshold = 0.7;
+                        let snow_with_noise_threshold = 0.6;
+                        
+                        // Grass in lower areas
+                        let grass_threshold = 0.3;
+                        let grass_with_noise_threshold = 0.4;
+                        
+                        // Use noise to create variation in boundaries
+                        if elevation_percent > snow_threshold ||
+                           (elevation_percent > snow_with_noise_threshold && base_noise_value > snow_with_noise_threshold) {
+                            // High elevations get snow
+                            TerrainSurface::Snow
+                        } else if elevation_percent < grass_threshold ||
+                                 (elevation_percent < grass_with_noise_threshold && base_noise_value < grass_with_noise_threshold) {
+                            // Lower elevations get grass (except beaches)
+                            if !is_coastal {
+                                TerrainSurface::Grass
+                            } else {
+                                TerrainSurface::Bare // Beaches remain bare
+                            }
                         } else {
-                            TerrainSurface::Bare // Beaches remain bare
+                            // Middle elevations are bare
+                            TerrainSurface::Bare
                         }
-                    } else {
-                        // Middle elevations are bare
-                        TerrainSurface::Bare
                     }
                 };
 
-                item.height = height as u8;
-                item.base_type = base_type as u8;
-                item.surface_type = surface_type as u8;
+                // Set cell data
+                cell.height = height as u8;
+                cell.base_type = base_type as u8;
+                cell.surface_type = surface_type as u8;
             }
         },
     );
@@ -651,26 +694,30 @@ fn switch_render_mode(
     }
 }
 
-// Update the material in the render world based on the extracted render mode
-fn update_render_mode(
+// Update the material uniforms including render mode and time values
+fn update_material_uniforms(
+    time: Res<Time>,
     render_mode: Res<TerrainRenderMode>,
     mut terrain_pipeline: ResMut<TerrainPipeline>,
     render_queue: Res<RenderQueue>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
 ) {
-    trace!("Updating terrain material with render mode: {}", render_mode.mode);
     if let Some(material) = materials.get_mut(terrain_pipeline.terrain_material.id()) {
-        // 更新材质的mode
+        // Update all uniform fields
         material.material_uniform.mode = render_mode.mode;
+        material.material_uniform.time_x = time.elapsed_secs();
+        material.material_uniform.time_y = time.delta_secs();
+        material.material_uniform.time_z = time.elapsed_secs().sin();
+        material.material_uniform.time_w = time.elapsed_secs().cos();
         
-        // 如果material_bind_group已存在，更新其中的uniform buffer
+        // Update uniform buffer if bind group exists
         if let Some(prepared_bind_group) = &mut terrain_pipeline.material_bind_group {
             for (binding_index, binding_resource) in &prepared_bind_group.bindings {
                 if *binding_index == 0 {
                     if let OwnedBindingResource::Buffer(buffer) = binding_resource {
                         render_queue.write_buffer(
                             buffer,
-                            0,  // 偏移量为0
+                            0,
                             bytemuck::cast_slice(&[material.material_uniform])
                         );
                         break;
@@ -822,7 +869,7 @@ impl Plugin for Terrain2dPlugin {
                 .add_systems(
                     Render,
                     (
-                        update_render_mode,
+                        update_material_uniforms,
                         bind_terrain_material.in_set(RenderSet::PrepareBindGroups),
                         prepare_terrain_bind_group.in_set(RenderSet::PrepareBindGroups),
                         queue_terrain_mesh2d.in_set(RenderSet::QueueMeshes),

@@ -32,7 +32,7 @@ struct TerrainMaterialUniform {
     padding1: u32,
     padding2: u32,
     padding3: u32,
-    time: vec4<f32>,
+    time: vec4<f32>, // elapsed secs, delta_secs, sin(elapsed secs), cos(elapsed secs)
 }
 
 @group(2) @binding(0) var<uniform> terrainMaterial: TerrainMaterialUniform;
