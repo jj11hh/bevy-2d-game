@@ -2,23 +2,13 @@ mod render_layers;
 mod terrain;
 mod movement;
 mod creature;
-mod game_state;
+mod terrain_material;
 
 use bevy::prelude::*;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use movement::movement;
 use crate::terrain::{Terrain2dPlugin, TILE_PIXEL_SIZE};
-use crate::game_state::GameStatePlugin;
 
-const RANDOM_SEED: u32 = 1;
-
-const SEA_LEVEL: f32 = 64.0f32;
-const HEIGHT_LIMIT: f32 = 255.0f32;
-
-#[derive(Resource)]
-struct NoiseSource<T> {
-    noise: T
-}
 
 fn main() {
 
@@ -30,7 +20,6 @@ fn main() {
             }),
             WorldInspectorPlugin::new(),
             Terrain2dPlugin,
-            GameStatePlugin,
         ))
         .add_systems(Startup, startup)
         .add_systems(Update, movement)
