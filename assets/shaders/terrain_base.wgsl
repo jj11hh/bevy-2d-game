@@ -43,8 +43,11 @@ struct TerrainMaterialUniform {
 @group(2) @binding(3) var grainy_texture: texture_2d<f32>;
 @group(2) @binding(4) var grainy_sampler: sampler;
 
-@group(3) @binding(0) var terrain_map_texture: texture_2d<f32>;
-@group(3) @binding(1) var terrain_map_sampler: sampler;
+@group(3) @binding(0) var terrain_map_texture_rt: texture_2d<f32>;
+@group(3) @binding(1) var terrain_map_texture_lt: texture_2d<f32>;
+@group(3) @binding(2) var terrain_map_texture_rb: texture_2d<f32>;
+@group(3) @binding(3) var terrain_map_texture_lb: texture_2d<f32>;
+@group(3) @binding(4) var terrain_map_sampler: sampler;
 
 fn rock(mesh: VertexOutput, tile_data: vec4<f32>) -> vec4<f32> {
     let noise = textureSample(super_perlin_texture, super_perlin_sampler, mesh.world_position.xy * 0.25);
@@ -152,24 +155,45 @@ fn shaperstep(x: f32, softness: f32) -> f32 {
     return lower_half * is_less_than_half + upper_half * (1.0 - is_less_than_half);
 }
 
+fn load_terrain_data(load_pos: vec2<i32>) -> vec4<f32> {
+    let half_size = i32(ISLAND_CHUNK_SIZE/2);
+    let size = i32(ISLAND_CHUNK_SIZE);
+    let pos = load_pos - vec2<i32>(half_size, half_size);
+    if pos.x >= 0 {
+        if pos.y >= 0 {
+            return textureLoad(terrain_map_texture_rb, pos, 0);
+        }
+        else {
+            return textureLoad(terrain_map_texture_rt, vec2<i32>(pos.x, size + pos.y), 0);
+        }
+    }
+    else {
+        if pos.y >= 0 {
+            return textureLoad(terrain_map_texture_lb, vec2<i32>(size + pos.x, pos.y), 0);
+        }
+        else {
+            return textureLoad(terrain_map_texture_lt, vec2<i32>(size + pos.x, size + pos.y), 0);
+        }
+    }
+}
+
 @fragment
 fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let load_pos_f = mesh.uv * f32(ISLAND_CHUNK_SIZE);
-
     let load_pos_i = vec2<i32>(load_pos_f);
     let sample_dir = load_pos_f - vec2<f32>(load_pos_i) - vec2<f32>(0.5, 0.5);
     let sample_sign = vec4<i32>(vec2<i32>(sign(sample_dir)), 0, 0);
 
-    let mask0 = textureLoad(terrain_map_texture, load_pos_i + vec2<i32>(sample_sign.z, 0), 0);
-    let mask1 = textureLoad(terrain_map_texture, load_pos_i + vec2<i32>(sample_sign.x, sample_sign.z), 0);
-    let mask2 = textureLoad(terrain_map_texture, load_pos_i + vec2<i32>(sample_sign.z, sample_sign.y), 0);
-    let mask3 = textureLoad(terrain_map_texture, load_pos_i + vec2<i32>(sample_sign.x, sample_sign.y), 0);
+    let data0 = load_terrain_data(load_pos_i + vec2<i32>(sample_sign.z, 0));
+    let data1 = load_terrain_data(load_pos_i + vec2<i32>(sample_sign.x, sample_sign.z));
+    let data2 = load_terrain_data(load_pos_i + vec2<i32>(sample_sign.z, sample_sign.y));
+    let data3 = load_terrain_data(load_pos_i + vec2<i32>(sample_sign.x, sample_sign.y));
 
-    // Get colors for all four masks
-    let color0 = shade_tile(mesh, mask0);
-    let color1 = shade_tile(mesh, mask1);
-    let color2 = shade_tile(mesh, mask2);
-    let color3 = shade_tile(mesh, mask3);
+    // Get colors for all four data texture
+    let color0 = shade_tile(mesh, data0);
+    let color1 = shade_tile(mesh, data1);
+    let color2 = shade_tile(mesh, data2);
+    let color3 = shade_tile(mesh, data3);
 
     // Calculate sharper interpolation factors based on sample_dir
     // For values between 0.1-0.9, use the current tile's color completely

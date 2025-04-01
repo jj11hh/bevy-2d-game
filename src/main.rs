@@ -4,9 +4,9 @@ mod game_state;
 mod terrain;
 
 use bevy::prelude::*;
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_inspector_egui::quick::{ResourceInspectorPlugin, WorldInspectorPlugin};
 use movement::movement;
-use crate::terrain::{Terrain2dPlugin, TILE_PIXEL_SIZE};
+use crate::terrain::{Terrain2dPlugin, TerrainChunkRenderers, TILE_PIXEL_SIZE};
 use crate::game_state::GameStatePlugin;
 
 
@@ -15,13 +15,14 @@ fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins.set(AssetPlugin {
-                watch_for_changes_override: Some(true),
-                ..Default::default()
-            }),
-            WorldInspectorPlugin::new(),
-            Terrain2dPlugin,
-            GameStatePlugin,
-        ))
+            watch_for_changes_override: Some(true),
+            ..Default::default()
+        }),
+        WorldInspectorPlugin::new(),
+        Terrain2dPlugin,
+        GameStatePlugin,
+        ResourceInspectorPlugin::<TerrainChunkRenderers>::default(),
+    ))
         .add_systems(Startup, startup)
         .add_systems(Update, movement)
         .run();

@@ -1,13 +1,17 @@
 use bevy::asset::Assets;
 use bevy::core_pipeline::core_2d::Transparent2d;
-use bevy::ecs::entity::{EntityHash, EntityHashSet};
+use bevy::ecs::entity::EntityHash;
 use bevy::ecs::query::ROQueryItem;
 use bevy::ecs::system::lifetimeless::{Read, SRes};
-use bevy::ecs::system::{StaticSystemParam, SystemParamItem};
-use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
-use bevy::math::{vec2, vec3, AspectRatio, FloatOrd};
+use bevy::ecs::system::{StaticSystemParam, SystemParamItem, SystemState};
+use bevy::image::{
+    ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor, TextureFormatPixelInfo,
+};
+use bevy::math::{vec2, vec3, FloatOrd};
 use bevy::pbr::MeshFlags;
 use bevy::prelude::*;
+use bevy::render::batching::NoAutomaticBatching;
+use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::mesh::{MeshVertexBufferLayoutRef, RenderMesh, RenderMeshBufferInfo};
@@ -19,11 +23,11 @@ use bevy::render::render_phase::{
 use bevy::render::render_resource::binding_types::{sampler, texture_2d};
 use bevy::render::render_resource::{
     AddressMode, AsBindGroup, BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries,
-    Extent3d, FilterMode, ImageDataLayout, IntoBinding, OwnedBindingResource, PipelineCache,
-    PreparedBindGroup, RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderRef,
-    ShaderStages, SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-    TextureViewDescriptor,
+    BindingResource, DefaultImageSampler, Extent3d, FilterMode, ImageDataLayout, IntoBinding,
+    OwnedBindingResource, PipelineCache, PreparedBindGroup, RenderPipelineDescriptor,
+    SamplerBindingType, SamplerDescriptor, ShaderRef, ShaderStages, SpecializedMeshPipeline,
+    SpecializedMeshPipelineError, SpecializedMeshPipelines, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::sync_component::SyncComponentPlugin;
@@ -44,9 +48,8 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use strum::FromRepr;
 
-use self::material::{TerrainBaseMaterial, GRAINY_TEXTURE_PATH, SUPER_PERLIN_TEXTURE_PATH};
-
 use self::layers::TerrainMaterial;
+use self::material::TerrainBaseMaterial;
 
 mod layers;
 mod material;
@@ -81,6 +84,7 @@ pub struct TerrainPipeline<M: TerrainMaterial> {
     material_layout: BindGroupLayout,
     per_chunk_data_layout: BindGroupLayout,
     material_bind_group: Option<PreparedBindGroup<<TerrainBaseMaterial as AsBindGroup>::Data>>,
+    dummy_black_gpu_image: GpuImage,
     terrain_shader: Handle<Shader>,
     terrain_material: M,
 }
@@ -117,9 +121,7 @@ pub fn extract_terrain_chunk(
     let mut active_entities = MainEntityHashSet::with_capacity_and_hasher(0, EntityHash::default());
 
     for (entity, render_entity, terrain_chunk, changed) in &query {
-        commands
-            .entity(render_entity.id())
-            .insert(TerrainChunkGpuMarker {});
+        commands.entity(render_entity.id());
 
         let main_entity = MainEntity::from(entity);
         active_entities.insert(main_entity);
@@ -258,27 +260,44 @@ pub fn prepare_terrain_bind_group<M: TerrainMaterial + 'static>(
     render_device: Res<RenderDevice>,
     pipeline: Res<TerrainPipeline<M>>,
     data_store: Res<TerrainPerChunkDataStore>,
-    query: Query<(Entity, &MainEntity), With<TerrainChunkGpuMarker>>,
+    query: Query<(Entity, &MainEntity, &TerrainChunkRenderer), Without<TerrainPerChunkBindGroup>>,
 ) {
     trace!(
         "Preparing terrain bind groups for {} entities",
         query.iter().count()
     );
-    for (entity, main_entity) in query.iter() {
-        if let Some(data) = data_store.get(&MainEntity::from(main_entity.id())) {
-            let bind_group = render_device.create_bind_group(
-                "terrain_per_chunk",
-                &pipeline.per_chunk_data_layout,
-                &BindGroupEntries::with_indices((
-                    (0, data.terrain_map_gpu_image.texture_view.into_binding()),
-                    (1, data.terrain_map_gpu_image.sampler.into_binding()),
-                )),
-            );
 
-            commands
-                .entity(entity)
-                .insert(TerrainPerChunkBindGroup { value: bind_group });
-        }
+    for (entity, main_entity, renderer) in query.iter() {
+        let prepare_chunk = |index: usize| {
+            let chunk_entity = renderer.chunks[index];
+            info!(
+                "renderer({}).chunks[{}] = {:?}",
+                main_entity.id(),
+                index,
+                chunk_entity
+            );
+            if let Some(data) = data_store.0.get(&MainEntity::from(chunk_entity)) {
+                data.terrain_map_gpu_image.texture_view.into_binding()
+            } else {
+                pipeline.dummy_black_gpu_image.texture_view.into_binding()
+            }
+        };
+
+        let bind_group = render_device.create_bind_group(
+            "terrain_per_chunk_data",
+            &pipeline.per_chunk_data_layout,
+            &BindGroupEntries::sequential((
+                prepare_chunk(0),
+                prepare_chunk(1),
+                prepare_chunk(2),
+                prepare_chunk(3),
+                pipeline.dummy_black_gpu_image.sampler.into_binding(),
+            )),
+        );
+
+        commands
+            .entity(entity)
+            .insert(TerrainPerChunkBindGroup { value: bind_group });
     }
 }
 
@@ -286,8 +305,6 @@ impl<M: TerrainMaterial> FromWorld for TerrainPipeline<M> {
     fn from_world(world: &mut World) -> Self {
         trace!("Creating TerrainPipeline from world");
         let mesh2d_pipeline = Mesh2dPipeline::from_world(world);
-        let render_device = world.resource::<RenderDevice>();
-
         let terrain_shader: Handle<Shader> = match M::fragment_shader() {
             ShaderRef::Default => {
                 panic!("fragment shader required!");
@@ -296,21 +313,66 @@ impl<M: TerrainMaterial> FromWorld for TerrainPipeline<M> {
             ShaderRef::Path(path) => world.load_asset(path),
         };
 
+        let mut system_state: SystemState<(
+            Res<RenderDevice>,
+            Res<RenderQueue>,
+            Res<DefaultImageSampler>,
+        )> = SystemState::new(world);
+
+        let (render_device, render_queue, default_sampler) = system_state.get_mut(world);
+        let render_device = render_device.into_inner();
+        let dummy_black_gpu_image = {
+            let image = Image::default();
+            let texture = render_device.create_texture(&image.texture_descriptor);
+            let sampler = match image.sampler {
+                ImageSampler::Default => (**default_sampler).clone(),
+                ImageSampler::Descriptor(ref descriptor) => {
+                    render_device.create_sampler(&descriptor.as_wgpu())
+                }
+            };
+
+            let format_size = image.texture_descriptor.format.pixel_size();
+            render_queue.write_texture(
+                texture.as_image_copy(),
+                &image.data,
+                ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(image.width() * format_size as u32),
+                    rows_per_image: None,
+                },
+                image.texture_descriptor.size,
+            );
+
+            let texture_view = texture.create_view(&TextureViewDescriptor::default());
+            GpuImage {
+                texture,
+                texture_view,
+                texture_format: image.texture_descriptor.format,
+                sampler,
+                size: image.size(),
+                mip_level_count: image.texture_descriptor.mip_level_count,
+            }
+        };
+
         Self {
             mesh2d_pipeline,
-            material_layout: TerrainBaseMaterial::bind_group_layout(render_device),
+            material_layout: M::bind_group_layout(render_device),
             per_chunk_data_layout: render_device.create_bind_group_layout(
                 "per_chunk_data",
                 &BindGroupLayoutEntries::with_indices(
                     ShaderStages::FRAGMENT,
                     (
                         (0, texture_2d(TextureSampleType::Float { filterable: true })),
-                        (1, sampler(SamplerBindingType::Filtering)),
+                        (1, texture_2d(TextureSampleType::Float { filterable: true })),
+                        (2, texture_2d(TextureSampleType::Float { filterable: true })),
+                        (3, texture_2d(TextureSampleType::Float { filterable: true })),
+                        (4, sampler(SamplerBindingType::Filtering)),
                     ),
                 ),
             ),
             material_bind_group: None,
-            terrain_shader: terrain_shader,
+            dummy_black_gpu_image,
+            terrain_shader,
             terrain_material: M::from_world(world),
         }
     }
@@ -372,7 +434,7 @@ impl Default for TerrainSurface {
     }
 }
 
-#[derive(Debug, Default, Copy, Zeroable, Clone, Pod)]
+#[derive(Debug, Default, Copy, Zeroable, Clone, Pod, Reflect)]
 #[repr(C)]
 pub struct TerrainCell {
     height: u8,
@@ -381,18 +443,22 @@ pub struct TerrainCell {
     _padding: u8,
 }
 
-#[derive(Component, Clone, Debug)]
-pub struct TerrainChunkGpuMarker;
-
 /// 标记地形块已更改，需要更新GPU纹理数据
 #[derive(Component, Clone, Debug, Default)]
 #[component(storage = "SparseSet")]
 pub struct TerrainChunkChanged;
 
-#[derive(Component, Clone, Debug)]
+#[derive(Component, Clone, Debug, Reflect)]
 pub struct TerrainChunk {
     id: IVec2,
     data: Vec<TerrainCell>,
+}
+
+#[derive(Component, Clone, Debug, Reflect, ExtractComponent)]
+pub struct TerrainChunkRenderer {
+    pos: IVec2,
+    chunks: [Entity; 4],
+    version: usize,
 }
 
 /// Generates terrain data for a chunk using multiple noise sources
@@ -533,20 +599,17 @@ pub fn generate_tiles(
 
 pub fn spawn_initial_chunks(
     mut commands: Commands,
-    meshes: ResMut<Assets<Mesh>>,
     noise_source: Res<NoiseSource<Frequency<Fbm<OpenSimplex2>, Constant>>>,
 ) {
     let noise_source = noise_source.into_inner();
-    let meshes = meshes.into_inner();
-    spawn_tilemap(&mut commands, meshes, noise_source, IVec2::new(0, 0));
-    spawn_tilemap(&mut commands, meshes, noise_source, IVec2::new(-1, 0));
-    spawn_tilemap(&mut commands, meshes, noise_source, IVec2::new(-1, -1));
-    spawn_tilemap(&mut commands, meshes, noise_source, IVec2::new(0, -1));
+    spawn_tilemap(&mut commands, noise_source, IVec2::new(0, 0));
+    spawn_tilemap(&mut commands, noise_source, IVec2::new(-1, 0));
+    spawn_tilemap(&mut commands, noise_source, IVec2::new(-1, -1));
+    spawn_tilemap(&mut commands, noise_source, IVec2::new(0, -1));
 }
 
 pub fn spawn_tilemap(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     noise_source: &NoiseSource<Frequency<Fbm<OpenSimplex2>, Constant>>,
     id: IVec2,
 ) {
@@ -555,20 +618,115 @@ pub fn spawn_tilemap(
         vec![TerrainCell::default(); (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
 
     generate_tiles(id, &mut chunk_data, noise_source);
+    commands.spawn((TerrainChunk {
+        id,
+        data: chunk_data,
+    },));
+}
 
-    let left_bottom = id.as_vec2() * (ISLAND_CHUNK_SIZE as f32);
-    let center = left_bottom + vec2(ISLAND_CHUNK_SIZE as f32, ISLAND_CHUNK_SIZE as f32) * 0.5;
-    commands.spawn((
-        Mesh2d(meshes.add(Rectangle::new(
+#[derive(Resource, Default, Debug, Reflect)]
+pub struct TerrainChunkRenderers(HashMap<IVec2, Entity>);
+
+#[derive(Resource)]
+pub struct TerrainChunkMesh(Handle<Mesh>);
+
+impl FromWorld for TerrainChunkMesh {
+    fn from_world(world: &mut World) -> Self {
+        let mut meshes = world.get_resource_mut::<Assets<Mesh>>().unwrap();
+        let handle = meshes.add(Rectangle::new(
             ISLAND_CHUNK_SIZE as f32,
             ISLAND_CHUNK_SIZE as f32,
-        ))),
-        TerrainChunk {
-            id,
-            data: chunk_data,
-        },
-        Transform::from_translation(vec3(center.x, center.y, 0.0)),
-    ));
+        ));
+        Self(handle)
+    }
+}
+
+pub fn on_add_chunk(
+    trigger: Trigger<OnAdd, TerrainChunk>,
+    query_chunks: Query<&TerrainChunk>,
+    mut commands: Commands,
+    renderers: ResMut<TerrainChunkRenderers>,
+    chunk_mesh: Res<TerrainChunkMesh>,
+) {
+    let renderers = renderers.into_inner();
+    let entity = trigger.entity();
+    if let Ok(chunk) = query_chunks.get(entity) {
+        let positions = vec![
+            chunk.id,
+            chunk.id + IVec2::new(1, 0),
+            chunk.id + IVec2::new(0, 1),
+            chunk.id + IVec2::new(1, 1),
+        ];
+
+        for (i, pos) in positions.iter().enumerate() {
+            if let Some(renderer_entity) = renderers.0.get(pos) {
+                if renderer_entity.index() != Entity::PLACEHOLDER.index() {
+                    let renderer_entity = *renderer_entity;
+                    commands
+                        .entity(renderer_entity)
+                        .entry::<TerrainChunkRenderer>()
+                        .and_modify(move |mut renderer| {
+                            renderer.chunks[i] = entity;
+                            renderer.version += 1;
+                            info!(
+                                "set renderer {} chunks [{}] to {} ",
+                                renderer_entity, i, entity
+                            );
+                        });
+                } else {
+                    warn!("renderer entity {} not ready!", renderer_entity);
+                }
+            } else {
+                let mut chunks = [Entity::PLACEHOLDER; 4];
+                chunks[i] = entity;
+
+                let id = commands
+                    .spawn((
+                        Mesh2d(chunk_mesh.0.clone()),
+                        NoAutomaticBatching,
+                        TerrainChunkRenderer {
+                            pos: *pos,
+                            chunks,
+                            version: 0,
+                        },
+                        Transform::from_translation(vec3(
+                            (pos.x * ISLAND_CHUNK_SIZE as i32) as f32,
+                            (pos.y * ISLAND_CHUNK_SIZE as i32) as f32,
+                            0.0,
+                        )),
+                    ))
+                    .id();
+
+                info!("new renderer {} chunks [{}] to {} ", id, i, entity);
+                renderers.0.insert(*pos, id);
+            }
+        }
+    }
+}
+
+pub fn on_remove_chunk(
+    trigger: Trigger<OnAdd, TerrainChunk>,
+    query_chunks: Query<&TerrainChunk>,
+    mut query_renderers: Query<&mut TerrainChunkRenderer>,
+    renderers: ResMut<TerrainChunkRenderers>,
+) {
+    let renderers = renderers.into_inner();
+    let entity = trigger.entity();
+    if let Ok(chunk) = query_chunks.get(entity) {
+        let positions = vec![
+            chunk.id,
+            chunk.id + IVec2::new(1, 0),
+            chunk.id + IVec2::new(0, 1),
+            chunk.id + IVec2::new(1, 1),
+        ];
+        for (i, pos) in positions.iter().enumerate() {
+            if let Some(entity) = renderers.0.get(pos) {
+                if let Ok(mut renderer) = query_renderers.get_mut(*entity) {
+                    renderer.chunks[i] = Entity::PLACEHOLDER;
+                }
+            }
+        }
+    }
 }
 
 fn switch_render_mode(
@@ -621,11 +779,13 @@ fn update_material_uniforms(
 }
 
 pub fn extract_terrain_mesh2d(
-    query: Extract<Query<(Entity, &ViewVisibility, &GlobalTransform, &Mesh2d), With<TerrainChunk>>>,
+    query: Extract<
+        Query<(Entity, &ViewVisibility, &GlobalTransform, &Mesh2d), With<TerrainChunkRenderer>>,
+    >,
     mut render_mesh_instances: ResMut<RenderTerrainMeshInstances>,
 ) {
     trace!(
-        "Extracting terrain mesh2d instances from {} entities",
+        "Extracting terrain renderer mesh2d instances from {} entities",
         query.iter().count()
     );
     for (entity, view_visibility, transform, handle) in &query {
@@ -736,13 +896,19 @@ impl Plugin for Terrain2dPlugin {
             .fbm(4, 0.5, 2.0)
             .frequency(2.4 / ISLAND_CHUNK_SIZE as f32);
 
-        app.add_plugins(SyncComponentPlugin::<TerrainChunk>::default());
+        app.add_plugins(SyncComponentPlugin::<TerrainChunk>::default()); // TODO: Do we need it?
         app.add_plugins(ExtractResourcePlugin::<TerrainRenderMode>::default());
+        app.add_plugins(ExtractComponentPlugin::<TerrainChunkRenderer>::default());
+        app.register_type::<TerrainChunkRenderer>();
 
         app.insert_resource(NoiseSource { noise: fbm })
+            .init_resource::<TerrainChunkMesh>()
+            .init_resource::<TerrainChunkRenderers>()
             .init_resource::<TerrainRenderMode>()
             .add_systems(Startup, spawn_initial_chunks)
-            .add_systems(Update, switch_render_mode);
+            .add_systems(Update, switch_render_mode)
+            .add_observer(on_add_chunk)
+            .add_observer(on_remove_chunk);
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
