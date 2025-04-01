@@ -1,13 +1,13 @@
-mod render_layers;
-mod terrain;
 mod movement;
 mod creature;
-mod terrain_material;
+mod game_state;
+mod terrain;
 
 use bevy::prelude::*;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use movement::movement;
 use crate::terrain::{Terrain2dPlugin, TILE_PIXEL_SIZE};
+use crate::game_state::GameStatePlugin;
 
 
 fn main() {
@@ -20,6 +20,7 @@ fn main() {
             }),
             WorldInspectorPlugin::new(),
             Terrain2dPlugin,
+            GameStatePlugin,
         ))
         .add_systems(Startup, startup)
         .add_systems(Update, movement)
