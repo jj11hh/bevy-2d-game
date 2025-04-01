@@ -1,11 +1,11 @@
 use bevy::asset::Assets;
 use bevy::core_pipeline::core_2d::Transparent2d;
-use bevy::ecs::entity::{EntityHash, EntityHashMap};
+use bevy::ecs::entity::EntityHash;
 use bevy::ecs::query::ROQueryItem;
 use bevy::ecs::system::lifetimeless::{Read, SRes};
 use bevy::ecs::system::{StaticSystemParam, SystemParamItem, SystemState};
 use bevy::image::{
-    ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor, TextureFormatPixelInfo,
+    ImageSampler, TextureFormatPixelInfo,
 };
 use bevy::math::{vec2, vec3, FloatOrd};
 use bevy::pbr::MeshFlags;
@@ -22,8 +22,7 @@ use bevy::render::render_phase::{
 };
 use bevy::render::render_resource::binding_types::{sampler, texture_2d};
 use bevy::render::render_resource::{
-    AddressMode, AsBindGroup, BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries,
-    BindingResource, DefaultImageSampler, Extent3d, FilterMode, ImageDataLayout, IntoBinding,
+    AddressMode, AsBindGroup, BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, DefaultImageSampler, Extent3d, FilterMode, ImageDataLayout, IntoBinding,
     OwnedBindingResource, PipelineCache, PreparedBindGroup, RenderPipelineDescriptor,
     SamplerBindingType, SamplerDescriptor, ShaderRef, ShaderStages, SpecializedMeshPipeline,
     SpecializedMeshPipelineError, SpecializedMeshPipelines, TextureDescriptor, TextureDimension,
@@ -916,7 +915,7 @@ impl Plugin for Terrain2dPlugin {
             .fbm(4, 0.5, 2.0)
             .frequency(2.4 / ISLAND_RADIUS);
 
-        app.add_plugins(SyncComponentPlugin::<TerrainChunk>::default()); // TODO: Do we need it?
+        app.add_plugins(SyncComponentPlugin::<TerrainChunk>::default());
         app.add_plugins(ExtractResourcePlugin::<TerrainRenderMode>::default());
         app.add_plugins(ExtractComponentPlugin::<TerrainChunkRenderer>::default());
         app.register_type::<TerrainChunkRenderer>();
