@@ -1,6 +1,6 @@
 use bevy::asset::Assets;
 use bevy::core_pipeline::core_2d::Transparent2d;
-use bevy::ecs::entity::EntityHash;
+use bevy::ecs::entity::{EntityHash, EntityHashMap};
 use bevy::ecs::query::ROQueryItem;
 use bevy::ecs::system::lifetimeless::{Read, SRes};
 use bevy::ecs::system::{StaticSystemParam, SystemParamItem, SystemState};
@@ -64,9 +64,9 @@ pub struct NoiseSource<T> {
     noise: T,
 }
 
-const ISLAND_CHUNK_SIZE: u32 = 64;
+const ISLAND_CHUNK_SIZE: u32 = 128;
 
-const ISLAND_RADIUS: f32 = 64.0;
+const ISLAND_RADIUS: f32 = 256.0;
 
 pub const TILE_PIXEL_SIZE: f32 = 32.0;
 
@@ -95,6 +95,9 @@ pub struct TerrainPerChunkData {
 
 #[derive(Resource, Deref, DerefMut, Default)]
 pub struct TerrainPerChunkDataStore(MainEntityHashMap<TerrainPerChunkData>);
+
+#[derive(Resource, Deref, DerefMut, Default)]
+pub struct TerrainRendererVersions(MainEntityHashMap<usize>);
 
 #[derive(Component, Debug, Clone)]
 pub struct TerrainPerChunkBindGroup {
@@ -260,14 +263,23 @@ pub fn prepare_terrain_bind_group<M: TerrainMaterial + 'static>(
     render_device: Res<RenderDevice>,
     pipeline: Res<TerrainPipeline<M>>,
     data_store: Res<TerrainPerChunkDataStore>,
-    query: Query<(Entity, &MainEntity, &TerrainChunkRenderer), Without<TerrainPerChunkBindGroup>>,
+    versions: ResMut<TerrainRendererVersions>,
+    query: Query<(Entity, &MainEntity, &TerrainChunkRenderer)>,
 ) {
     trace!(
         "Preparing terrain bind groups for {} entities",
         query.iter().count()
     );
 
+    let versions = &mut versions.into_inner().0;
+
     for (entity, main_entity, renderer) in query.iter() {
+        if let Some(last_version) = versions.get(main_entity) {
+            if *last_version == renderer.version {
+                continue;
+            }
+        }
+
         let prepare_chunk = |index: usize| {
             let chunk_entity = renderer.chunks[index];
             info!(
@@ -298,6 +310,8 @@ pub fn prepare_terrain_bind_group<M: TerrainMaterial + 'static>(
         commands
             .entity(entity)
             .insert(TerrainPerChunkBindGroup { value: bind_group });
+
+        versions.insert(main_entity.clone(), renderer.version);
     }
 }
 
@@ -459,6 +473,12 @@ pub struct TerrainChunkRenderer {
     pos: IVec2,
     chunks: [Entity; 4],
     version: usize,
+}
+
+impl TerrainChunkRenderer {
+    pub fn mark_dirty(&mut self) {
+        self.version += 1;
+    }
 }
 
 /// Generates terrain data for a chunk using multiple noise sources
@@ -667,7 +687,7 @@ pub fn on_add_chunk(
                         .entry::<TerrainChunkRenderer>()
                         .and_modify(move |mut renderer| {
                             renderer.chunks[i] = entity;
-                            renderer.version += 1;
+                            renderer.mark_dirty();
                             info!(
                                 "set renderer {} chunks [{}] to {} ",
                                 renderer_entity, i, entity
@@ -894,7 +914,7 @@ impl Plugin for Terrain2dPlugin {
         trace!("Building Terrain2dPlugin");
         let fbm = OpenSimplex2
             .fbm(4, 0.5, 2.0)
-            .frequency(2.4 / ISLAND_CHUNK_SIZE as f32);
+            .frequency(2.4 / ISLAND_RADIUS);
 
         app.add_plugins(SyncComponentPlugin::<TerrainChunk>::default()); // TODO: Do we need it?
         app.add_plugins(ExtractResourcePlugin::<TerrainRenderMode>::default());
@@ -914,6 +934,7 @@ impl Plugin for Terrain2dPlugin {
             render_app
                 .add_render_command::<Transparent2d, DrawTerrainMesh2d>()
                 .init_resource::<SpecializedMeshPipelines<TerrainPipeline<TerrainBaseMaterial>>>()
+                .init_resource::<TerrainRendererVersions>()
                 .init_resource::<RenderTerrainMeshInstances>()
                 .init_resource::<TerrainPerChunkDataStore>()
                 .init_resource::<TerrainRenderMode>()

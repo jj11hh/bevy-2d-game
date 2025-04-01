@@ -2,7 +2,7 @@
 
 const SEA_LEVEL: f32 = 64.0;
 const HEIGHT_LIMIT: f32 = 255.0;
-const ISLAND_CHUNK_SIZE: u32 = 64;
+const ISLAND_CHUNK_SIZE: u32 = 128;
 const TILE_PIXEL_SIZE: f32 = 32.0;
 
 const LIGHT_OCEAN_COLOR: vec3<f32> = vec3<f32>(0.18, 0.835, 1);
