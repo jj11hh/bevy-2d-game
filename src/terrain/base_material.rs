@@ -9,7 +9,7 @@ use bevy::render::texture::{FallbackImage, GpuImage};
 use bytemuck::{Pod, Zeroable};
 use std::mem::size_of;
 use std::num::NonZeroU64;
-use crate::terrain::layers::TerrainMaterial;
+use super::layers::TerrainMaterial;
 
 pub const TERRAIN_SHADER_PATH: &str = "shaders/terrain_base.wgsl";
 pub const SUPER_PERLIN_TEXTURE_PATH: &str = "textures/sperlin_rock.png";

@@ -1,9 +1,7 @@
 use bevy::asset::Assets;
 use bevy::core_pipeline::core_2d::Transparent2d;
 use bevy::ecs::entity::EntityHash;
-use bevy::ecs::query::ROQueryItem;
-use bevy::ecs::system::lifetimeless::{Read, SRes};
-use bevy::ecs::system::{StaticSystemParam, SystemParamItem, SystemState};
+use bevy::ecs::system::{StaticSystemParam, SystemState};
 use bevy::image::{
     ImageSampler, TextureFormatPixelInfo,
 };
@@ -13,50 +11,57 @@ use bevy::prelude::*;
 use bevy::render::batching::NoAutomaticBatching;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::mesh::allocator::MeshAllocator;
-use bevy::render::mesh::{MeshVertexBufferLayoutRef, RenderMesh, RenderMeshBufferInfo};
+use bevy::render::mesh::{MeshVertexBufferLayoutRef, RenderMesh};
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_phase::{
-    AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand,
-    RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewSortedRenderPhases,
+    AddRenderCommand, DrawFunctions, PhaseItemExtraIndex, ViewSortedRenderPhases,
 };
 use bevy::render::render_resource::binding_types::{sampler, texture_2d};
 use bevy::render::render_resource::{
-    AddressMode, AsBindGroup, BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutEntries, DefaultImageSampler, Extent3d, FilterMode, ImageDataLayout, IntoBinding,
-    OwnedBindingResource, PipelineCache, PreparedBindGroup, RenderPipelineDescriptor,
+    AddressMode, AsBindGroup, BindGroupEntries, BindGroupLayoutEntries, DefaultImageSampler, Extent3d, FilterMode, ImageDataLayout, IntoBinding,
+    OwnedBindingResource, PipelineCache, RenderPipelineDescriptor,
     SamplerBindingType, SamplerDescriptor, ShaderRef, ShaderStages, SpecializedMeshPipeline,
     SpecializedMeshPipelineError, SpecializedMeshPipelines, TextureDescriptor, TextureDimension,
     TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
 };
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::sync_component::SyncComponentPlugin;
-use bevy::render::sync_world::{MainEntity, MainEntityHashMap, MainEntityHashSet, RenderEntity};
+use bevy::render::sync_world::{MainEntity, MainEntityHashSet, RenderEntity};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{ExtractedView, RenderVisibleEntities};
 use bevy::render::{Extract, Render, RenderApp, RenderSet};
+use bevy::render::sync_world::MainEntityHashMap;
 use bevy::sprite::{
-    extract_mesh2d, Material2dBindGroupId, Mesh2dBindGroup, Mesh2dPipeline, Mesh2dPipelineKey,
-    Mesh2dTransforms, RenderMesh2dInstance, SetMesh2dViewBindGroup,
+    extract_mesh2d, Material2dBindGroupId, Mesh2dPipeline, Mesh2dPipelineKey,
+    Mesh2dTransforms, RenderMesh2dInstance,
 };
 use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
 use bevy::utils::HashMap;
 use bytemuck::{Pod, Zeroable};
 use noise_functions::modifiers::{Fbm, Frequency};
 use noise_functions::{Constant, Noise, OpenSimplex2, Sample};
-use std::marker::PhantomData;
 use std::mem::size_of;
 use strum::FromRepr;
 
-use self::layers::TerrainMaterial;
-use self::material::TerrainBaseMaterial;
-
 mod layers;
-mod material;
+mod base_material;
+mod draw;
+
+use self::layers::TerrainMaterial;
+use self::base_material::TerrainBaseMaterial;
+use self::draw::*;
+
+pub type DrawTerrainBaseMesh2d = DrawTerrainMesh2d<TerrainBaseMaterial>;
 
 const RANDOM_SEED: u32 = 1;
-
 const SEA_LEVEL: f32 = 64.0f32;
 const HEIGHT_LIMIT: f32 = 255.0f32;
+
+#[derive(Resource, Deref, DerefMut, Default)]
+pub struct TerrainPerChunkDataStore(pub MainEntityHashMap<TerrainPerChunkData>);
+
+#[derive(Resource, Deref, DerefMut, Default)]
+pub struct TerrainRendererVersions(pub MainEntityHashMap<usize>);
 
 #[derive(Resource)]
 pub struct NoiseSource<T> {
@@ -76,34 +81,8 @@ pub struct TerrainRenderMode {
     pub mode: u32,
 }
 
-#[derive(Resource)]
-pub struct TerrainPipeline<M: TerrainMaterial> {
-    /// This pipeline wraps the standard [`Mesh2dPipeline`]
-    mesh2d_pipeline: Mesh2dPipeline,
-    material_layout: BindGroupLayout,
-    per_chunk_data_layout: BindGroupLayout,
-    material_bind_group: Option<PreparedBindGroup<<TerrainBaseMaterial as AsBindGroup>::Data>>,
-    dummy_black_gpu_image: GpuImage,
-    terrain_shader: Handle<Shader>,
-    terrain_material: M,
-}
 
-pub struct TerrainPerChunkData {
-    terrain_map_gpu_image: GpuImage,
-}
-
-#[derive(Resource, Deref, DerefMut, Default)]
-pub struct TerrainPerChunkDataStore(MainEntityHashMap<TerrainPerChunkData>);
-
-#[derive(Resource, Deref, DerefMut, Default)]
-pub struct TerrainRendererVersions(MainEntityHashMap<usize>);
-
-#[derive(Component, Debug, Clone)]
-pub struct TerrainPerChunkBindGroup {
-    pub value: BindGroup,
-}
-
-pub fn extract_terrain_chunk(
+pub fn extract_terrain_chunk<TrunkType: AsTextureProvider + Component>(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -112,7 +91,7 @@ pub fn extract_terrain_chunk(
         Query<(
             Entity,
             &RenderEntity,
-            &TerrainChunk,
+            &TrunkType,
             Option<&TerrainChunkChanged>,
         )>,
     >,
@@ -129,19 +108,14 @@ pub fn extract_terrain_chunk(
         active_entities.insert(main_entity);
 
         // Determine if we need to create or update
-
-        // 判断是否需要创建或更新
         let needs_update = changed.is_some() || !data_store.contains_key(&main_entity);
 
         // Skip if no update needed
-
-        // 如果不需要更新则跳过
         if !needs_update {
             continue;
         }
 
         // Convert terrain data to texture format
-        let image_data: Vec<u8> = bytemuck::cast_slice(&terrain_chunk.data).to_vec();
         let format_size = size_of::<TerrainCell>();
 
         // Update existing texture if data exists, otherwise create a new one
@@ -149,20 +123,22 @@ pub fn extract_terrain_chunk(
             // Get existing GPU image
             if let Some(data) = data_store.get_mut(&main_entity) {
                 // Update existing texture
-                render_queue.write_texture(
-                    data.terrain_map_gpu_image.texture.as_image_copy(),
-                    &image_data,
-                    ImageDataLayout {
-                        offset: 0,
-                        bytes_per_row: Some(ISLAND_CHUNK_SIZE * format_size as u32),
-                        rows_per_image: None,
-                    },
-                    Extent3d {
-                        width: ISLAND_CHUNK_SIZE,
-                        height: ISLAND_CHUNK_SIZE,
-                        depth_or_array_layers: 1,
-                    },
-                );
+                terrain_chunk.provide_texture(|image_data| {
+                    render_queue.write_texture(
+                        data.terrain_map_gpu_image.texture.as_image_copy(),
+                        &image_data,
+                        ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(ISLAND_CHUNK_SIZE * format_size as u32),
+                            rows_per_image: None,
+                        },
+                        Extent3d {
+                            width: ISLAND_CHUNK_SIZE,
+                            height: ISLAND_CHUNK_SIZE,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                });
 
                 trace!(
                     "Updated existing terrain chunk texture for entity: {:?}",
@@ -206,16 +182,18 @@ pub fn extract_terrain_chunk(
 
             // Write texture data to GPU
             let format_size = size_of::<TerrainCell>();
-            render_queue.write_texture(
-                texture.as_image_copy(),
-                &image_data,
-                ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(ISLAND_CHUNK_SIZE * format_size as u32),
-                    rows_per_image: None,
-                },
-                texture_descriptor.size,
-            );
+            terrain_chunk.provide_texture(|image_data| {
+                render_queue.write_texture(
+                    texture.as_image_copy(),
+                    &image_data,
+                    ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(ISLAND_CHUNK_SIZE * format_size as u32),
+                        rows_per_image: None,
+                    },
+                    texture_descriptor.size,
+                );
+            });
 
             // Create texture view
             let texture_view = texture.create_view(&TextureViewDescriptor::default());
@@ -412,9 +390,6 @@ impl<M: TerrainMaterial> SpecializedMeshPipeline for TerrainPipeline<M> {
     }
 }
 
-#[derive(Resource, Deref, DerefMut, Default)]
-pub struct RenderTerrainMeshInstances(MainEntityHashMap<RenderMesh2dInstance>);
-
 /// Base terrain material that determines physical properties
 #[derive(Debug, PartialEq, FromRepr)]
 #[repr(u8)]
@@ -463,8 +438,26 @@ pub struct TerrainChunkChanged;
 
 #[derive(Component, Clone, Debug, Reflect)]
 pub struct TerrainChunk {
-    id: IVec2,
+    pos: IVec2,
     data: Vec<TerrainCell>,
+}
+
+pub trait AsTextureProvider {
+    fn provide_texture<F>(&self, callback: F) where F: Fn(&[u8]);
+}
+
+impl AsTextureProvider for TerrainChunk {
+    fn provide_texture<F>(&self, callback: F) where F: Fn(&[u8]) {
+        callback(bytemuck::cast_slice(&self.data));
+    }
+}
+
+pub trait GetChunkPos {
+    fn get_pos(&self) -> IVec2;
+}
+
+impl GetChunkPos for TerrainChunk {
+    fn get_pos(&self) -> IVec2 { return self.pos; }
 }
 
 #[derive(Component, Clone, Debug, Reflect, ExtractComponent)]
@@ -638,7 +631,7 @@ pub fn spawn_tilemap(
 
     generate_tiles(id, &mut chunk_data, noise_source);
     commands.spawn((TerrainChunk {
-        id,
+        pos: id,
         data: chunk_data,
     },));
 }
@@ -660,9 +653,9 @@ impl FromWorld for TerrainChunkMesh {
     }
 }
 
-pub fn on_add_chunk(
-    trigger: Trigger<OnAdd, TerrainChunk>,
-    query_chunks: Query<&TerrainChunk>,
+pub fn on_add_chunk<T: Component + GetChunkPos>(
+    trigger: Trigger<OnAdd, T>,
+    query_chunks: Query<&T>,
     mut commands: Commands,
     renderers: ResMut<TerrainChunkRenderers>,
     chunk_mesh: Res<TerrainChunkMesh>,
@@ -670,11 +663,12 @@ pub fn on_add_chunk(
     let renderers = renderers.into_inner();
     let entity = trigger.entity();
     if let Ok(chunk) = query_chunks.get(entity) {
+        let chunk_pos = chunk.get_pos();
         let positions = vec![
-            chunk.id,
-            chunk.id + IVec2::new(1, 0),
-            chunk.id + IVec2::new(0, 1),
-            chunk.id + IVec2::new(1, 1),
+            chunk_pos,
+            chunk_pos + IVec2::new(1, 0),
+            chunk_pos + IVec2::new(0, 1),
+            chunk_pos + IVec2::new(1, 1),
         ];
 
         for (i, pos) in positions.iter().enumerate() {
@@ -723,20 +717,21 @@ pub fn on_add_chunk(
     }
 }
 
-pub fn on_remove_chunk(
-    trigger: Trigger<OnAdd, TerrainChunk>,
-    query_chunks: Query<&TerrainChunk>,
+pub fn on_remove_chunk<T: Component + GetChunkPos>(
+    trigger: Trigger<OnAdd, T>,
+    query_chunks: Query<&T>,
     mut query_renderers: Query<&mut TerrainChunkRenderer>,
     renderers: ResMut<TerrainChunkRenderers>,
 ) {
     let renderers = renderers.into_inner();
     let entity = trigger.entity();
     if let Ok(chunk) = query_chunks.get(entity) {
+        let chunk_pos = chunk.get_pos();
         let positions = vec![
-            chunk.id,
-            chunk.id + IVec2::new(1, 0),
-            chunk.id + IVec2::new(0, 1),
-            chunk.id + IVec2::new(1, 1),
+            chunk_pos,
+            chunk_pos + IVec2::new(1, 0),
+            chunk_pos + IVec2::new(0, 1),
+            chunk_pos + IVec2::new(1, 1),
         ];
         for (i, pos) in positions.iter().enumerate() {
             if let Some(entity) = renderers.0.get(pos) {
@@ -857,7 +852,7 @@ pub fn queue_terrain_mesh2d<M: TerrainMaterial + 'static>(
             continue;
         };
 
-        let draw_terrain_mesh2d = transparent_draw_functions.read().id::<DrawTerrainMesh2d>();
+        let draw_terrain_mesh2d = transparent_draw_functions.read().id::<DrawTerrainBaseMesh2d>();
 
         let mesh_key = Mesh2dPipelineKey::from_msaa_samples(msaa.samples())
             | Mesh2dPipelineKey::from_hdr(view.hdr);
@@ -926,12 +921,12 @@ impl Plugin for Terrain2dPlugin {
             .init_resource::<TerrainRenderMode>()
             .add_systems(Startup, spawn_initial_chunks)
             .add_systems(Update, switch_render_mode)
-            .add_observer(on_add_chunk)
-            .add_observer(on_remove_chunk);
+            .add_observer(on_add_chunk::<TerrainChunk>)
+            .add_observer(on_remove_chunk::<TerrainChunk>);
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
-                .add_render_command::<Transparent2d, DrawTerrainMesh2d>()
+                .add_render_command::<Transparent2d, DrawTerrainBaseMesh2d>()
                 .init_resource::<SpecializedMeshPipelines<TerrainPipeline<TerrainBaseMaterial>>>()
                 .init_resource::<TerrainRendererVersions>()
                 .init_resource::<RenderTerrainMeshInstances>()
@@ -940,7 +935,7 @@ impl Plugin for Terrain2dPlugin {
                 .add_systems(
                     ExtractSchedule,
                     (
-                        extract_terrain_chunk,
+                        extract_terrain_chunk::<TerrainChunk>,
                         extract_terrain_mesh2d.after(extract_mesh2d),
                     ),
                 )
@@ -965,103 +960,6 @@ impl Plugin for Terrain2dPlugin {
     }
 }
 
-pub struct DrawTerrain2d;
-impl<P: PhaseItem> RenderCommand<P> for DrawTerrain2d {
-    type Param = (
-        SRes<RenderAssets<RenderMesh>>,
-        SRes<RenderTerrainMeshInstances>,
-        SRes<MeshAllocator>,
-    );
-    type ViewQuery = ();
-    type ItemQuery = ();
-
-    #[inline]
-    fn render<'w>(
-        item: &P,
-        _view: (),
-        _item_query: Option<()>,
-        (meshes, terrain_mesh_instances, mesh_allocator): SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        trace!(
-            "Rendering DrawTerrain2d for entity: {:?}",
-            item.main_entity()
-        );
-        let meshes = meshes.into_inner();
-        let terrain_mesh_instances = terrain_mesh_instances.into_inner();
-        let mesh_allocator = mesh_allocator.into_inner();
-
-        let Some(RenderMesh2dInstance { mesh_asset_id, .. }) =
-            terrain_mesh_instances.get(&item.main_entity())
-        else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(gpu_mesh) = meshes.get(*mesh_asset_id) else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(vertex_buffer_slice) = mesh_allocator.mesh_vertex_slice(mesh_asset_id) else {
-            return RenderCommandResult::Skip;
-        };
-
-        pass.set_vertex_buffer(0, vertex_buffer_slice.buffer.slice(..));
-
-        let batch_range = item.batch_range();
-        match &gpu_mesh.buffer_info {
-            RenderMeshBufferInfo::Indexed {
-                index_format,
-                count,
-            } => {
-                let Some(index_buffer_slice) = mesh_allocator.mesh_index_slice(mesh_asset_id)
-                else {
-                    return RenderCommandResult::Skip;
-                };
-
-                pass.set_index_buffer(index_buffer_slice.buffer.slice(..), 0, *index_format);
-
-                pass.draw_indexed(
-                    index_buffer_slice.range.start..(index_buffer_slice.range.start + count),
-                    vertex_buffer_slice.range.start as i32,
-                    batch_range.clone(),
-                );
-            }
-            RenderMeshBufferInfo::NonIndexed => {
-                pass.draw(vertex_buffer_slice.range, batch_range.clone());
-            }
-        }
-        RenderCommandResult::Success
-    }
-}
-
-pub struct SetTerrainBindGroup<const I: usize>;
-impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetTerrainBindGroup<I> {
-    type Param = SRes<Mesh2dBindGroup>;
-    type ViewQuery = ();
-    type ItemQuery = ();
-
-    #[inline]
-    fn render<'w>(
-        item: &P,
-        _view: (),
-        _item_query: Option<()>,
-        mesh2d_bind_group: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        trace!("Setting terrain bind group for phase item");
-        let mut dynamic_offsets: [u32; 1] = Default::default();
-        let mut offset_count = 0;
-        if let Some(dynamic_offset) = item.extra_index().as_dynamic_offset() {
-            dynamic_offsets[offset_count] = dynamic_offset.get();
-            offset_count += 1;
-        }
-        pass.set_bind_group(
-            I,
-            &mesh2d_bind_group.into_inner().value,
-            &dynamic_offsets[..offset_count],
-        );
-        RenderCommandResult::Success
-    }
-}
-
 pub fn bind_terrain_material(
     mut pipeline: ResMut<TerrainPipeline<TerrainBaseMaterial>>,
     render_device: Res<RenderDevice>,
@@ -1083,69 +981,3 @@ pub fn bind_terrain_material(
 
     pipeline.material_bind_group = Some(prepared);
 }
-
-pub struct SetTerrainMaterialBindGroup<const I: usize, M: TerrainMaterial + 'static> {
-    marker: PhantomData<M>,
-}
-
-impl<P: PhaseItem, const I: usize, M: TerrainMaterial + 'static> RenderCommand<P>
-    for SetTerrainMaterialBindGroup<I, M>
-{
-    type Param = SRes<TerrainPipeline<M>>;
-    type ViewQuery = ();
-    type ItemQuery = ();
-
-    #[inline]
-    fn render<'w>(
-        _: &P,
-        _view: (),
-        _item_query: Option<()>,
-        pipeline: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        trace!("Setting terrain material bind group");
-        let pipeline = pipeline.into_inner();
-
-        let Some(bind_group) = &pipeline.material_bind_group else {
-            return RenderCommandResult::Skip;
-        };
-
-        pass.set_bind_group(I, &bind_group.bind_group, &[]);
-
-        RenderCommandResult::Success
-    }
-}
-
-pub struct SetTerrainPerChunkBindGroup<const I: usize>;
-impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetTerrainPerChunkBindGroup<I> {
-    type Param = ();
-    type ViewQuery = ();
-    type ItemQuery = Read<TerrainPerChunkBindGroup>;
-
-    #[inline]
-    fn render<'w>(
-        _item: &P,
-        _view: ROQueryItem<'w, Self::ViewQuery>,
-        entity: Option<ROQueryItem<'w, Self::ItemQuery>>,
-        _param: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        trace!("Setting terrain per-chunk bind group");
-        let Some(terrain_per_chunk_bind_group) = entity else {
-            return RenderCommandResult::Skip;
-        };
-
-        pass.set_bind_group(I, &terrain_per_chunk_bind_group.value, &[]);
-
-        RenderCommandResult::Success
-    }
-}
-
-type DrawTerrainMesh2d = (
-    SetItemPipeline,
-    SetMesh2dViewBindGroup<0>,
-    SetTerrainBindGroup<1>,
-    SetTerrainMaterialBindGroup<2, TerrainBaseMaterial>,
-    SetTerrainPerChunkBindGroup<3>,
-    DrawTerrain2d,
-);
