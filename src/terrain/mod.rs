@@ -38,7 +38,7 @@ use bevy::sprite::{
 use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
 use bevy::utils::HashMap;
 use bytemuck::{Pod, Zeroable};
-use layers::AsCellAccessor;
+use layers::{AsCellAccessor, CellAccessError};
 use noise_functions::modifiers::{Fbm, Frequency};
 use noise_functions::{Constant, Noise, OpenSimplex2, Sample};
 use std::mem::size_of;
@@ -456,27 +456,64 @@ impl AsCellAccessor<TerrainBaseCell> for TerrainChunk {
         }
     }
 
-    fn set_cell(&mut self, pos: IVec2, data: TerrainBaseCell) -> bool {
+    fn set_cell(&mut self, pos: IVec2, data: TerrainBaseCell) -> Result<(), CellAccessError> {
         if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
         || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
-            return false;
+            Err(CellAccessError::ChunkAccessFailed)
         }
         else {
             self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)] = data;
-            return true;
+            Ok(())
         }
     }
 
-    fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> bool where F: Fn(&mut TerrainBaseCell) {
+    fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> Result<(), CellAccessError> 
+    where F: Fn(&mut TerrainBaseCell) {
         if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
         || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
-            return false;
+            Err(CellAccessError::ChunkAccessFailed)
         }
         else {
             let data = &mut self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)];
             op(data);
-            return true;
+            Ok(())
         }
+    }
+
+    fn bulk_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
+    where
+        F: Fn(IVec2, &mut TerrainBaseCell) + Send + Sync
+    {
+        // Check bounds
+        if start_pos.x < 0 || start_pos.y < 0
+            || end_pos_exclusive.x > ISLAND_CHUNK_SIZE as i32
+            || end_pos_exclusive.y > ISLAND_CHUNK_SIZE as i32
+            || start_pos.x > end_pos_exclusive.x
+            || start_pos.y > end_pos_exclusive.y
+        {
+            return Err(CellAccessError::ChunkAccessFailed);
+        }
+
+        let task_pool = ComputeTaskPool::get();
+        let chunk_width = ISLAND_CHUNK_SIZE as usize;
+        let data_slice = &mut self.data.as_mut_slice()[
+            start_pos.y as usize * chunk_width..end_pos_exclusive.y as usize * chunk_width
+            ];
+        let op = &op;
+
+        task_pool.scope(|scope| {
+            for (index, chunk) in data_slice.chunks_mut(chunk_width).enumerate() {
+                let y = index as i32 + start_pos.y;
+                scope.spawn(async move { 
+                    for x in start_pos.x..end_pos_exclusive.x {
+                        let pos = IVec2::new(x, y);
+                        op(pos, &mut chunk[x as usize]);
+                    }
+                });
+            }
+        });
+
+        Ok(())
     }
 }
 
@@ -518,7 +555,7 @@ impl TerrainChunkRenderer {
 /// * `noise_source` - Primary noise source for height generation
 pub fn generate_tiles(
     id: IVec2,
-    chunk_data: &mut Vec<TerrainBaseCell>,
+    chunk_data: &mut TerrainChunk,
     noise_source: &NoiseSource<Frequency<Fbm<OpenSimplex2>, Constant>>,
 ) {
     // let center = vec2( ISLAND_CHUNK_SIZE as f32 / 2.0f32, ISLAND_CHUNK_SIZE as f32 / 2.0f32, );
@@ -537,114 +574,107 @@ pub fn generate_tiles(
     let start_x = id.x * ISLAND_CHUNK_SIZE as i32;
     let start_y = id.y * ISLAND_CHUNK_SIZE as i32;
 
-    chunk_data.par_chunk_map_mut(
-        ComputeTaskPool::get(),
-        ISLAND_CHUNK_SIZE as usize,
-        |chunk_index, data| {
-            for (i, item) in data.iter_mut().enumerate() {
-                let index = (chunk_index * ISLAND_CHUNK_SIZE as usize + i) as u32;
-                let ux = index % ISLAND_CHUNK_SIZE;
-                let uy = ISLAND_CHUNK_SIZE - index / ISLAND_CHUNK_SIZE;
-                let x = ux as i32 + start_x;
-                let y = uy as i32 + start_y;
-                let position = vec2(x as f32, y as f32);
+    chunk_data.bulk_access(IVec2::ZERO, IVec2::new(ISLAND_CHUNK_SIZE as i32, ISLAND_CHUNK_SIZE as i32), 
+    |pos, item| {
+        let x = pos.x + start_x;
+        let y = pos.y + start_y;
+        let position = vec2(x as f32, y as f32);
 
-                // Height noise
-                let noise = noise_source
-                    .noise
-                    .sample_with_seed([position.x, position.y], RANDOM_SEED as i32)
-                    * 0.5
-                    + 0.5;
+        // Height noise
+        let noise = noise_source
+            .noise
+            .sample_with_seed([position.x, position.y], RANDOM_SEED as i32)
+            * 0.5
+            + 0.5;
 
-                // Get shape noise to create irregular island shape
-                let shape_noise_value = shape_noise
-                    .sample_with_seed([position.x, position.y], (RANDOM_SEED + 123) as i32)
-                    * 0.5
-                    + 0.5;
+        // Get shape noise to create irregular island shape
+        let shape_noise_value = shape_noise
+            .sample_with_seed([position.x, position.y], (RANDOM_SEED + 123) as i32)
+            * 0.5
+            + 0.5;
 
-                // Perturb the distance calculation with noise to create irregular coastline
-                let angle = position.y.atan2(position.x);
-                let noise_factor = 0.3; // Controls how irregular the coastline is
-                let distance_perturbation = (shape_noise_value - 0.5) * noise_factor;
+        // Perturb the distance calculation with noise to create irregular coastline
+        let angle = position.y.atan2(position.x);
+        let noise_factor = 0.3; // Controls how irregular the coastline is
+        let distance_perturbation = (shape_noise_value - 0.5) * noise_factor;
 
-                // Calculate distance with perturbation
-                let distance_from_center =
-                    (position - center).length() * (1.0 + distance_perturbation);
+        // Calculate distance with perturbation
+        let distance_from_center =
+            (position - center).length() * (1.0 + distance_perturbation);
 
-                // Use a different exponent to create more varied island shape
-                let height_scale = 1.0 - (distance_from_center / ISLAND_RADIUS).powf(1.8);
+        // Use a different exponent to create more varied island shape
+        let height_scale = 1.0 - (distance_from_center / ISLAND_RADIUS).powf(1.8);
 
-                // Apply additional shape variation based on angle
-                let angular_variation = (angle * 4.0).sin() * 0.1;
-                let height_scale = (height_scale + angular_variation).max(0.0);
+        // Apply additional shape variation based on angle
+        let angular_variation = (angle * 4.0).sin() * 0.1;
+        let height_scale = (height_scale + angular_variation).max(0.0);
 
-                let height = height_scale * noise * HEIGHT_LIMIT;
+        let height = height_scale * noise * HEIGHT_LIMIT;
 
-                // Base type noise
-                let base_noise_value = base_noise
-                    .sample_with_seed([position.x, position.y], (RANDOM_SEED + 42) as i32)
-                    * 0.5
-                    + 0.5;
+        // Base type noise
+        let base_noise_value = base_noise
+            .sample_with_seed([position.x, position.y], (RANDOM_SEED + 42) as i32)
+            * 0.5
+            + 0.5;
 
-                // Determine if this is a coastal area (near sea level)
-                let is_coastal = height > SEA_LEVEL - 5.0 && height < SEA_LEVEL + 10.0;
+        // Determine if this is a coastal area (near sea level)
+        let is_coastal = height > SEA_LEVEL - 5.0 && height < SEA_LEVEL + 10.0;
 
-                // Determine base type
-                let base_type = if is_coastal {
-                    // Coastal areas are always sandy beaches
-                    TerrainBase::Sand
-                } else if height <= SEA_LEVEL {
-                    // Underwater areas - mix of sand and mud
-                    if base_noise_value < 0.4 {
-                        TerrainBase::Sand
-                    } else {
-                        TerrainBase::Mud
-                    }
-                } else {
-                    // Land areas - mix of rock and soil based on noise and height
-                    if height > SEA_LEVEL + 50.0 || base_noise_value > 0.7 {
-                        TerrainBase::Rock // Higher elevations and some random areas are rocky
-                    } else {
-                        TerrainBase::Soil // Most land is soil
-                    }
-                };
-
-                // Determine surface type
-                let surface_type = if height <= SEA_LEVEL {
-                    // Underwater is always water
-                    TerrainSurface::Water
-                } else {
-                    // Land areas - determine surface based on height and noise
-                    let elevation_percent = (height - SEA_LEVEL) / (HEIGHT_LIMIT - SEA_LEVEL);
-
-                    // Use base_noise to add variation to surface type boundaries
-                    let surface_noise = base_noise_value;
-
-                    if elevation_percent > 0.7 || (elevation_percent > 0.6 && surface_noise > 0.6) {
-                        // High elevations get snow
-                        TerrainSurface::Snow
-                    } else if elevation_percent < 0.3
-                        || (elevation_percent < 0.4 && surface_noise < 0.4)
-                    {
-                        // Lower elevations get grass (except beaches which are handled by base type)
-                        if !is_coastal {
-                            TerrainSurface::Grass
-                        } else {
-                            TerrainSurface::Bare // Beaches remain bare
-                        }
-                    } else {
-                        // Middle elevations are bare
-                        TerrainSurface::Bare
-                    }
-                };
-
-                // Set cell data
-                item.height = height as u8;
-                item.base_type = base_type as u8;
-                item.surface_type = surface_type as u8;
+        // Determine base type
+        let base_type = if is_coastal {
+            // Coastal areas are always sandy beaches
+            TerrainBase::Sand
+        } else if height <= SEA_LEVEL {
+            // Underwater areas - mix of sand and mud
+            if base_noise_value < 0.4 {
+                TerrainBase::Sand
+            } else {
+                TerrainBase::Mud
             }
-        },
-    );
+        } else {
+            // Land areas - mix of rock and soil based on noise and height
+            if height > SEA_LEVEL + 50.0 || base_noise_value > 0.7 {
+                TerrainBase::Rock // Higher elevations and some random areas are rocky
+            } else {
+                TerrainBase::Soil // Most land is soil
+            }
+        };
+
+        // Determine surface type
+        let surface_type = if height <= SEA_LEVEL {
+            // Underwater is always water
+            TerrainSurface::Water
+        } else {
+            // Land areas - determine surface based on height and noise
+            let elevation_percent = (height - SEA_LEVEL) / (HEIGHT_LIMIT - SEA_LEVEL);
+
+            // Use base_noise to add variation to surface type boundaries
+            let surface_noise = base_noise_value;
+
+            if elevation_percent > 0.7 || (elevation_percent > 0.6 && surface_noise > 0.6) {
+                // High elevations get snow
+                TerrainSurface::Snow
+            } else if elevation_percent < 0.3
+                || (elevation_percent < 0.4 && surface_noise < 0.4)
+            {
+                // Lower elevations get grass (except beaches which are handled by base type)
+                if !is_coastal {
+                    TerrainSurface::Grass
+                } else {
+                    TerrainSurface::Bare // Beaches remain bare
+                }
+            } else {
+                // Middle elevations are bare
+                TerrainSurface::Bare
+            }
+        };
+
+        // Set cell data
+        item.height = height as u8;
+        item.base_type = base_type as u8;
+        item.surface_type = surface_type as u8;
+    }).unwrap();
+
 }
 
 pub fn spawn_initial_chunks(
@@ -664,14 +694,11 @@ pub fn spawn_tilemap(
     id: IVec2,
 ) {
     trace!("Spawning tilemap with chunk size: {}", ISLAND_CHUNK_SIZE);
-    let mut chunk_data =
-        vec![TerrainBaseCell::default(); (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
+    let chunk_data = vec![TerrainBaseCell::default(); (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
 
-    generate_tiles(id, &mut chunk_data, noise_source);
-    commands.spawn((TerrainChunk {
-        pos: id,
-        data: chunk_data,
-    },));
+    let mut chunk = TerrainChunk { pos: id, data: chunk_data, };
+    generate_tiles(id, &mut chunk, noise_source);
+    commands.spawn(chunk);
 }
 
 #[derive(Resource, Default, Debug, Reflect)]

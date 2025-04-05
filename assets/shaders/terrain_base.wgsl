@@ -161,18 +161,18 @@ fn load_terrain_data(load_pos: vec2<i32>) -> vec4<f32> {
     let pos = load_pos - vec2<i32>(half_size, half_size);
     if pos.x >= 0 {
         if pos.y >= 0 {
-            return textureLoad(terrain_map_texture_rb, pos, 0);
+            return textureLoad(terrain_map_texture_rb, vec2<i32>(pos.x, size - pos.y), 0);
         }
         else {
-            return textureLoad(terrain_map_texture_rt, vec2<i32>(pos.x, size + pos.y), 0);
+            return textureLoad(terrain_map_texture_rt, vec2<i32>(pos.x, - pos.y), 0);
         }
     }
     else {
         if pos.y >= 0 {
-            return textureLoad(terrain_map_texture_lb, vec2<i32>(size + pos.x, pos.y), 0);
+            return textureLoad(terrain_map_texture_lb, vec2<i32>(size + pos.x, size - pos.y), 0);
         }
         else {
-            return textureLoad(terrain_map_texture_lt, vec2<i32>(size + pos.x, size + pos.y), 0);
+            return textureLoad(terrain_map_texture_lt, vec2<i32>(size + pos.x, - pos.y), 0);
         }
     }
 }
