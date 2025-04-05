@@ -38,6 +38,7 @@ use bevy::sprite::{
 use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
 use bevy::utils::HashMap;
 use bytemuck::{Pod, Zeroable};
+use layers::AsCellAccessor;
 use noise_functions::modifiers::{Fbm, Frequency};
 use noise_functions::{Constant, Noise, OpenSimplex2, Sample};
 use std::mem::size_of;
@@ -47,7 +48,7 @@ mod layers;
 mod base_material;
 mod draw;
 
-use self::layers::TerrainMaterial;
+use self::layers::{TerrainMaterial, TerrainCellData};
 use self::base_material::TerrainBaseMaterial;
 use self::draw::*;
 
@@ -116,7 +117,7 @@ pub fn extract_terrain_chunk<TrunkType: AsTextureProvider + Component>(
         }
 
         // Convert terrain data to texture format
-        let format_size = size_of::<TerrainCell>();
+        let format_size = size_of::<TerrainBaseCell>();
 
         // Update existing texture if data exists, otherwise create a new one
         if changed.is_some() && data_store.contains_key(&main_entity) {
@@ -181,7 +182,7 @@ pub fn extract_terrain_chunk<TrunkType: AsTextureProvider + Component>(
             });
 
             // Write texture data to GPU
-            let format_size = size_of::<TerrainCell>();
+            let format_size = size_of::<TerrainBaseCell>();
             terrain_chunk.provide_texture(|image_data| {
                 render_queue.write_texture(
                     texture.as_image_copy(),
@@ -424,7 +425,7 @@ impl Default for TerrainSurface {
 
 #[derive(Debug, Default, Copy, Zeroable, Clone, Pod, Reflect)]
 #[repr(C)]
-pub struct TerrainCell {
+pub struct TerrainBaseCell {
     height: u8,
     base_type: u8,
     surface_type: u8,
@@ -439,7 +440,44 @@ pub struct TerrainChunkChanged;
 #[derive(Component, Clone, Debug, Reflect)]
 pub struct TerrainChunk {
     pos: IVec2,
-    data: Vec<TerrainCell>,
+    data: Vec<TerrainBaseCell>,
+}
+
+impl TerrainCellData for TerrainBaseCell {}
+
+impl AsCellAccessor<TerrainBaseCell> for TerrainChunk {
+    fn get_cell(&self, pos: IVec2) -> Option<TerrainBaseCell> {
+        if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
+        || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
+            return None;
+        }
+        else {
+            return Some(self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)]);
+        }
+    }
+
+    fn set_cell(&mut self, pos: IVec2, data: TerrainBaseCell) -> bool {
+        if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
+        || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
+            return false;
+        }
+        else {
+            self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)] = data;
+            return true;
+        }
+    }
+
+    fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> bool where F: Fn(&mut TerrainBaseCell) {
+        if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
+        || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
+            return false;
+        }
+        else {
+            let data = &mut self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)];
+            op(data);
+            return true;
+        }
+    }
 }
 
 pub trait AsTextureProvider {
@@ -480,7 +518,7 @@ impl TerrainChunkRenderer {
 /// * `noise_source` - Primary noise source for height generation
 pub fn generate_tiles(
     id: IVec2,
-    chunk_data: &mut Vec<TerrainCell>,
+    chunk_data: &mut Vec<TerrainBaseCell>,
     noise_source: &NoiseSource<Frequency<Fbm<OpenSimplex2>, Constant>>,
 ) {
     // let center = vec2( ISLAND_CHUNK_SIZE as f32 / 2.0f32, ISLAND_CHUNK_SIZE as f32 / 2.0f32, );
@@ -627,7 +665,7 @@ pub fn spawn_tilemap(
 ) {
     trace!("Spawning tilemap with chunk size: {}", ISLAND_CHUNK_SIZE);
     let mut chunk_data =
-        vec![TerrainCell::default(); (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
+        vec![TerrainBaseCell::default(); (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
 
     generate_tiles(id, &mut chunk_data, noise_source);
     commands.spawn((TerrainChunk {
