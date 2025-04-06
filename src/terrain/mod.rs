@@ -38,7 +38,7 @@ use bevy::sprite::{
 use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
 use bevy::utils::HashMap;
 use bytemuck::{Pod, Zeroable};
-use layers::{AsCellAccessor, CellAccessError};
+use layers::{CellAccessor, CellAccessError};
 use noise_functions::modifiers::{Fbm, Frequency};
 use noise_functions::{Constant, Noise, OpenSimplex2, Sample};
 use std::mem::size_of;
@@ -445,7 +445,7 @@ pub struct TerrainChunk {
 
 impl TerrainCellData for TerrainBaseCell {}
 
-impl AsCellAccessor<TerrainBaseCell> for TerrainChunk {
+impl CellAccessor<TerrainBaseCell> for TerrainChunk {
     fn get_cell(&self, pos: IVec2) -> Option<TerrainBaseCell> {
         if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
         || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {

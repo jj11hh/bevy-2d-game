@@ -19,7 +19,7 @@ pub enum CellAccessError {
     ChunkAccessFailed,
 }
 
-pub trait AsCellAccessor<CellData: TerrainCellData>: {
+pub trait CellAccessor<CellData: TerrainCellData>: {
     fn get_cell(&self, pos: IVec2) -> Option<CellData>;
     fn set_cell(&mut self, pos: IVec2, data: CellData) -> Result<(), CellAccessError>;
     fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> Result<(), CellAccessError> where F: Fn(&mut CellData);
@@ -35,10 +35,10 @@ pub struct TerrainChunkMap<CellData: TerrainCellData> {
     _phantom: PhantomData<CellData>,
 }
 
-pub trait ChunkCellAccessor<CellData: TerrainCellData>: AsCellAccessor<CellData> + Component {}
+pub trait ChunkCellAccessor<CellData: TerrainCellData>: CellAccessor<CellData> + Component {}
 
 #[derive(SystemParam)]
-pub struct CellAccessor<'w, 's, CellData, Chunk>
+pub struct GlobalCellAccessor<'w, 's, CellData, Chunk>
 where 
     CellData: TerrainCellData + 'static,
     Chunk: ChunkCellAccessor<CellData> + 'static,
@@ -47,7 +47,7 @@ where
     pub chunk_map: ResMut<'w, TerrainChunkMap<CellData>>,
 }
 
-impl<'w, 's, CellData, Chunk> CellAccessor<'w, 's, CellData, Chunk>
+impl<'w, 's, CellData, Chunk> GlobalCellAccessor<'w, 's, CellData, Chunk>
 where
     CellData: TerrainCellData + 'static,
     Chunk: ChunkCellAccessor<CellData> + 'static,
@@ -119,7 +119,7 @@ where
     }
 }
 
-impl<'w, 's, CellData, Chunk> AsCellAccessor<CellData> for CellAccessor<'w, 's, CellData, Chunk>
+impl<'w, 's, CellData, Chunk> CellAccessor<CellData> for GlobalCellAccessor<'w, 's, CellData, Chunk>
 where
     CellData: TerrainCellData + 'static,
     Chunk: ChunkCellAccessor<CellData> + 'static,
@@ -198,8 +198,8 @@ where
     {
         let op = &op;
         self.process_chunk_range(start_pos, end_pos_exclusive, |chunk, chunk_base, start, end| {
-            chunk.bulk_access(start, end, |start_pos, end_pos, stride, cells| { 
-                op(start_pos + chunk_base, end_pos + chunk_base, stride, cells) 
+            chunk.bulk_access(start, end, |start_pos, end_pos, stride, cells| {
+                op(start_pos + chunk_base, end_pos + chunk_base, stride, cells)
             })
         })
     }
@@ -209,8 +209,8 @@ where
     {
         let op = &op;
         self.process_chunk_range(start_pos, end_pos_exclusive, |chunk, chunk_base, start, end| {
-            chunk.parallel_access(start, end, |start_pos, end_pos, stride, cells| { 
-                op(start_pos + chunk_base, end_pos + chunk_base, stride, cells) 
+            chunk.parallel_access(start, end, |start_pos, end_pos, stride, cells| {
+                op(start_pos + chunk_base, end_pos + chunk_base, stride, cells)
             })
         })
     }
