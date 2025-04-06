@@ -24,7 +24,9 @@ pub trait AsCellAccessor<CellData: TerrainCellData>: {
     fn set_cell(&mut self, pos: IVec2, data: CellData) -> Result<(), CellAccessError>;
     fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> Result<(), CellAccessError> where F: Fn(&mut CellData);
     fn bulk_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError> 
-    where F: Fn(IVec2, &mut CellData) + Send + Sync;
+    where F: Fn(IVec2, IVec2, usize, &mut [CellData]);
+    fn parallel_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError> 
+    where F: Fn(IVec2, IVec2, usize, &mut [CellData]) + Send + Sync;
 }
 
 #[derive(Resource)]
@@ -43,6 +45,78 @@ where
 {
     pub query: Query<'w, 's, &'static mut Chunk>,
     pub chunk_map: ResMut<'w, TerrainChunkMap<CellData>>,
+}
+
+impl<'w, 's, CellData, Chunk> CellAccessor<'w, 's, CellData, Chunk>
+where
+    CellData: TerrainCellData + 'static,
+    Chunk: ChunkCellAccessor<CellData> + 'static,
+{
+    pub fn process_chunk_range<C>(
+        &mut self,
+        start_pos: IVec2,
+        end_pos_exclusive: IVec2,
+        chunk_access: C,
+    ) -> Result<(), CellAccessError>
+    where
+        C: Fn(&mut Chunk, IVec2, IVec2, IVec2) -> Result<(), CellAccessError>,
+    {
+        let chunk_size = ISLAND_CHUNK_SIZE as i32;
+        let start_chunk = IVec2::new(
+            start_pos.x.div_euclid(chunk_size),
+            start_pos.y.div_euclid(chunk_size),
+        );
+        let end_chunk = IVec2::new(
+            end_pos_exclusive.x.div_euclid(chunk_size),
+            end_pos_exclusive.y.div_euclid(chunk_size),
+        );
+
+        let mut any_success = false;
+        let mut any_failure = false;
+        
+        for chunk_y in start_chunk.y..=end_chunk.y {
+            for chunk_x in start_chunk.x..=end_chunk.x {
+                let chunk_pos = IVec2::new(chunk_x, chunk_y);
+                
+                let chunk_start = chunk_pos * chunk_size;
+                let chunk_end = chunk_start + IVec2::splat(chunk_size - 1);
+                
+                let local_start = IVec2::new(
+                    start_pos.x.max(chunk_start.x) - chunk_start.x,
+                    start_pos.y.max(chunk_start.y) - chunk_start.y,
+                );
+                let local_end = IVec2::new(
+                    end_pos_exclusive.x.min(chunk_end.x) - chunk_start.x,
+                    end_pos_exclusive.y.min(chunk_end.y) - chunk_start.y,
+                );
+
+                if let Some(entity) = self.chunk_map.map.get(&chunk_pos) {
+                    if let Ok(mut chunk) = self.query.get_mut(*entity) {
+                        let chunk_base = chunk_pos * chunk_size;
+                        if chunk_access(&mut chunk, chunk_base, local_start, local_end).is_ok() {
+                            any_success = true;
+                        } else {
+                            any_failure = true;
+                        }
+                    } else {
+                        any_failure = true;
+                    }
+                } else {
+                    any_failure = true;
+                }
+            }
+        }
+
+        if any_failure {
+            if any_success {
+                Err(CellAccessError::ChunkAccessFailed)
+            } else {
+                Err(CellAccessError::ChunkNotFound)
+            }
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl<'w, 's, CellData, Chunk> AsCellAccessor<CellData> for CellAccessor<'w, 's, CellData, Chunk>
@@ -118,69 +192,26 @@ where
             Err(CellAccessError::ChunkNotFound)
         }
     }
-    
+   
     fn bulk_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
-    where
-        F: Fn(IVec2, &mut CellData)+ Send + Sync
+    where F: Fn(IVec2, IVec2, usize, &mut [CellData])
     {
-        let chunk_size = ISLAND_CHUNK_SIZE as i32;
-        let start_chunk = IVec2::new(
-            start_pos.x.div_euclid(chunk_size),
-            start_pos.y.div_euclid(chunk_size),
-        );
-        let end_chunk = IVec2::new(
-            end_pos_exclusive.x.div_euclid(chunk_size),
-            end_pos_exclusive.y.div_euclid(chunk_size),
-        );
+        let op = &op;
+        self.process_chunk_range(start_pos, end_pos_exclusive, |chunk, chunk_base, start, end| {
+            chunk.bulk_access(start, end, |start_pos, end_pos, stride, cells| { 
+                op(start_pos + chunk_base, end_pos + chunk_base, stride, cells) 
+            })
+        })
+    }
 
-        let mut any_success = false;
-        let mut any_failure = false;
-        
-        // Iterate through all chunks in the range
-        for chunk_y in start_chunk.y..=end_chunk.y {
-            for chunk_x in start_chunk.x..=end_chunk.x {
-                let chunk_pos = IVec2::new(chunk_x, chunk_y);
-                
-                // Calculate local bounds for this chunk
-                let chunk_start = chunk_pos * chunk_size;
-                let chunk_end = chunk_start + IVec2::splat(chunk_size - 1);
-                
-                let local_start = IVec2::new(
-                    start_pos.x.max(chunk_start.x) - chunk_start.x,
-                    start_pos.y.max(chunk_start.y) - chunk_start.y,
-                );
-                let local_end = IVec2::new(
-                    end_pos_exclusive.x.min(chunk_end.x) - chunk_start.x,
-                    end_pos_exclusive.y.min(chunk_end.y) - chunk_start.y,
-                );
-
-                if let Some(entity) = self.chunk_map.map.get(&chunk_pos) {
-                    if let Ok(mut chunk) = self.query.get_mut(*entity) {
-                        let chunk_base = chunk_pos * chunk_size;
-                        if chunk.bulk_access(local_start, local_end, |local_pos, cell_data| {
-                            op(chunk_base + local_pos, cell_data)
-                        }).is_ok() {
-                            any_success = true;
-                        } else {
-                            any_failure = true;
-                        }
-                    } else {
-                        any_failure = true;
-                    }
-                } else {
-                    any_failure = true;
-                }
-            }
-        }
-
-        if any_failure {
-            if any_success {
-                Err(CellAccessError::ChunkAccessFailed) // Partial success
-            } else {
-                Err(CellAccessError::ChunkNotFound) // Complete failure
-            }
-        } else {
-            Ok(())
-        }
+    fn parallel_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
+    where F: Fn(IVec2, IVec2, usize, &mut [CellData]) + Send + Sync
+    {
+        let op = &op;
+        self.process_chunk_range(start_pos, end_pos_exclusive, |chunk, chunk_base, start, end| {
+            chunk.parallel_access(start, end, |start_pos, end_pos, stride, cells| { 
+                op(start_pos + chunk_base, end_pos + chunk_base, stride, cells) 
+            })
+        })
     }
 }
