@@ -3,4 +3,13 @@ name = "bevy-2d-game"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "texture_gen"
+path = "src/bin/texture_gen.rs"
+
 [dependencies]
+bevy = "0.15.3"
+bevy-inspector-egui = "0.29.1"
+bevy_ecs_tilemap = "0.15.0"
+noise = "0.9.0"
+noise-functions = "0.8.1"
