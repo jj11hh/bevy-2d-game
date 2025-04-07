@@ -29,7 +29,7 @@ pub trait CellAccessor<CellData: TerrainCellData>: {
     where F: Fn(IVec2, IVec2, usize, &mut [CellData]) + Send + Sync;
 }
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct TerrainChunkMap<CellData: TerrainCellData> {
     pub map: HashMap<IVec2, Entity>,
     _phantom: PhantomData<CellData>,
