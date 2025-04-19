@@ -160,7 +160,7 @@ fn load_terrain_data(load_pos: vec2<i32>) -> vec4<f32> {
     let size = i32(ISLAND_CHUNK_SIZE);
     let pos = load_pos - vec2<i32>(half_size, half_size);
     if pos.x >= 0 {
-        if pos.y >= 0 {
+        if pos.y > 0 {
             return textureLoad(terrain_map_texture_rb, vec2<i32>(pos.x, size - pos.y), 0);
         }
         else {
@@ -168,7 +168,7 @@ fn load_terrain_data(load_pos: vec2<i32>) -> vec4<f32> {
         }
     }
     else {
-        if pos.y >= 0 {
+        if pos.y > 0 {
             return textureLoad(terrain_map_texture_lb, vec2<i32>(size + pos.x, size - pos.y), 0);
         }
         else {
