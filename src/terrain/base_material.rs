@@ -3,7 +3,7 @@ use bevy::ecs::system::SystemParamItem;
 use bevy::image::{Image, ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_resource::{AddressMode, AsBindGroup, AsBindGroupError, BindGroupLayout, BindGroupLayoutEntry, BindingType, BufferBindingType, BufferInitDescriptor, BufferUsages, FilterMode, OwnedBindingResource, SamplerBindingType, SamplerDescriptor, ShaderRef, ShaderStages, TextureSampleType, TextureViewDimension, UnpreparedBindGroup};
+use bevy::render::render_resource::{AddressMode, AsBindGroup, AsBindGroupError, BindGroupLayout, BindGroupLayoutEntry, BindingResources, BindingType, BufferBindingType, BufferInitDescriptor, BufferUsages, FilterMode, OwnedBindingResource, SamplerBindingType, SamplerDescriptor, ShaderRef, ShaderStages, TextureSampleType, TextureViewDimension, UnpreparedBindGroup};
 use bevy::render::renderer::RenderDevice;
 use bevy::render::texture::{FallbackImage, GpuImage};
 use bytemuck::{Pod, Zeroable};
@@ -84,11 +84,14 @@ impl AsBindGroup for TerrainBaseMaterial {
         Some("terrain_material")
     }
 
+    fn bindless_supported(_: &RenderDevice) -> bool { false }
+
     fn unprepared_bind_group(
         &self,
         _layout: &BindGroupLayout,
         render_device: &RenderDevice,
         (images, fallback_image): &mut SystemParamItem<'_, '_, Self::Param>,
+        force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup<Self::Data>, AsBindGroupError> {
         let mut bindings = Vec::new();
 
@@ -107,7 +110,9 @@ impl AsBindGroup for TerrainBaseMaterial {
         // insert fallible texture-based entries at 0 so that if we fail here, we exit before allocating any buffers
         bindings.push((
             1,
-            OwnedBindingResource::TextureView({
+            OwnedBindingResource::TextureView(
+                TextureViewDimension::D2,
+                {
                 if let Some(texture_handle) = &self.super_perlin_rock {
                     images
                         .get(texture_handle)
@@ -122,7 +127,9 @@ impl AsBindGroup for TerrainBaseMaterial {
 
         bindings.push((
             2,
-            OwnedBindingResource::TextureView({
+            OwnedBindingResource::TextureView(
+                TextureViewDimension::D2,
+                {
                 if let Some(texture_handle) = &self.grainy_texture {
                     images
                         .get(texture_handle)
@@ -147,12 +154,12 @@ impl AsBindGroup for TerrainBaseMaterial {
         });
 
         // 使用自定义sampler而不是fallback_image的sampler
-        bindings.push((3, OwnedBindingResource::Sampler(custom_sampler)));
+        bindings.push((3, OwnedBindingResource::Sampler(SamplerBindingType::Filtering, custom_sampler)));
 
-        Ok(UnpreparedBindGroup { bindings, data: () })
+        Ok(UnpreparedBindGroup { bindings: BindingResources(bindings), data: () })
     }
 
-    fn bind_group_layout_entries(_render_device: &RenderDevice) -> Vec<BindGroupLayoutEntry> {
+    fn bind_group_layout_entries(_render_device: &RenderDevice, force_no_bindless: bool) -> Vec<BindGroupLayoutEntry> {
         vec![
             // Uniform buffer
             BindGroupLayoutEntry {

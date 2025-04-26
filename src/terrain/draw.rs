@@ -4,10 +4,7 @@ use bevy::ecs::system::lifetimeless::{Read, SRes};
 use bevy::ecs::system::SystemParamItem;
 use bevy::render::mesh::allocator::MeshAllocator;
 use bevy::render::mesh::{RenderMesh, RenderMeshBufferInfo};
-use bevy::render::render_phase::{
-    PhaseItem, RenderCommand,
-    RenderCommandResult, SetItemPipeline, TrackedRenderPass,
-};
+use bevy::render::render_phase::{PhaseItem, PhaseItemExtraIndex, RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass};
 use bevy::sprite::{
     Mesh2dBindGroup, Mesh2dPipeline, RenderMesh2dInstance, SetMesh2dViewBindGroup,
 };
@@ -127,8 +124,8 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetTerrainBindGroup<I> {
         trace!("Setting terrain bind group for phase item");
         let mut dynamic_offsets: [u32; 1] = Default::default();
         let mut offset_count = 0;
-        if let Some(dynamic_offset) = item.extra_index().as_dynamic_offset() {
-            dynamic_offsets[offset_count] = dynamic_offset.get();
+        if let PhaseItemExtraIndex::DynamicOffset(dynamic_offset) = item.extra_index() {
+            dynamic_offsets[offset_count] = dynamic_offset;
             offset_count += 1;
         }
         pass.set_bind_group(

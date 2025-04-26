@@ -17,13 +17,7 @@ use bevy::render::render_phase::{
     AddRenderCommand, DrawFunctions, PhaseItemExtraIndex, ViewSortedRenderPhases,
 };
 use bevy::render::render_resource::binding_types::{sampler, texture_2d};
-use bevy::render::render_resource::{
-    AddressMode, AsBindGroup, BindGroupEntries, BindGroupLayoutEntries, DefaultImageSampler, Extent3d, FilterMode, ImageDataLayout, IntoBinding,
-    OwnedBindingResource, PipelineCache, RenderPipelineDescriptor,
-    SamplerBindingType, SamplerDescriptor, ShaderRef, ShaderStages, SpecializedMeshPipeline,
-    SpecializedMeshPipelineError, SpecializedMeshPipelines, TextureDescriptor, TextureDimension,
-    TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
-};
+use bevy::render::render_resource::{AddressMode, AsBindGroup, BindGroupEntries, BindGroupLayoutEntries, DefaultImageSampler, Extent3d, FilterMode, IntoBinding, OwnedBindingResource, PipelineCache, RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderRef, ShaderStages, SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines, TexelCopyBufferLayout, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::sync_component::SyncComponentPlugin;
 use bevy::render::sync_world::{MainEntity, MainEntityHashSet, RenderEntity};
@@ -36,7 +30,7 @@ use bevy::sprite::{
     Mesh2dTransforms, RenderMesh2dInstance,
 };
 use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
-use bevy::utils::HashMap;
+use bevy::platform::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 use layers::{CellAccessError, CellAccessor, TerrainChunkMap};
 use noise_functions::{Noise, OpenSimplex2};
@@ -117,7 +111,7 @@ pub fn extract_terrain_chunk<TrunkType: AsTextureProvider + Component>(
                     render_queue.write_texture(
                         data.terrain_map_gpu_image.texture.as_image_copy(),
                         &image_data,
-                        ImageDataLayout {
+                        TexelCopyBufferLayout {
                             offset: 0,
                             bytes_per_row: Some(ISLAND_CHUNK_SIZE * format_size as u32),
                             rows_per_image: None,
@@ -176,7 +170,7 @@ pub fn extract_terrain_chunk<TrunkType: AsTextureProvider + Component>(
                 render_queue.write_texture(
                     texture.as_image_copy(),
                     &image_data,
-                    ImageDataLayout {
+                    TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(ISLAND_CHUNK_SIZE * format_size as u32),
                         rows_per_image: None,
@@ -194,7 +188,7 @@ pub fn extract_terrain_chunk<TrunkType: AsTextureProvider + Component>(
                 texture_view,
                 texture_format: texture_descriptor.format,
                 sampler,
-                size: UVec2::new(ISLAND_CHUNK_SIZE, ISLAND_CHUNK_SIZE),
+                size: Extent3d{ width: ISLAND_CHUNK_SIZE, height: ISLAND_CHUNK_SIZE, depth_or_array_layers: 1 },
                 mip_level_count: texture_descriptor.mip_level_count,
             }
         };
@@ -312,11 +306,13 @@ impl<M: TerrainMaterial> FromWorld for TerrainPipeline<M> {
                 }
             };
 
+            let image_data = image.data.as_ref().unwrap();
+
             let format_size = image.texture_descriptor.format.pixel_size();
             render_queue.write_texture(
                 texture.as_image_copy(),
-                &image.data,
-                ImageDataLayout {
+                image_data,
+                TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(image.width() * format_size as u32),
                     rows_per_image: None,
@@ -330,7 +326,7 @@ impl<M: TerrainMaterial> FromWorld for TerrainPipeline<M> {
                 texture_view,
                 texture_format: image.texture_descriptor.format,
                 sampler,
-                size: image.size(),
+                size: image.texture_descriptor.size,
                 mip_level_count: image.texture_descriptor.mip_level_count,
             }
         };
@@ -592,7 +588,7 @@ pub fn on_add_chunk<T: Component + GetChunkPos>(
     chunk_mesh: Res<TerrainChunkMesh>,
 ) {
     let renderers = renderers.into_inner();
-    let entity = trigger.entity();
+    let entity = trigger.target();
     if let Ok(chunk) = query_chunks.get(entity) {
         let chunk_pos = chunk.get_pos();
         let positions = vec![
@@ -655,7 +651,7 @@ pub fn on_remove_chunk<T: Component + GetChunkPos>(
     renderers: ResMut<TerrainChunkRenderers>,
 ) {
     let renderers = renderers.into_inner();
-    let entity = trigger.entity();
+    let entity = trigger.target();
     if let Ok(chunk) = query_chunks.get(entity) {
         let chunk_pos = chunk.get_pos();
         let positions = vec![
@@ -708,7 +704,7 @@ fn update_material_uniforms(
 
     // 如果material_bind_group已存在，更新其中的uniform buffer
     if let Some(prepared_bind_group) = &mut terrain_pipeline.material_bind_group {
-        for (binding_index, binding_resource) in &prepared_bind_group.bindings {
+        for (binding_index, binding_resource) in &prepared_bind_group.bindings.0 {
             if *binding_index == 0 {
                 if let OwnedBindingResource::Buffer(buffer) = binding_resource {
                     render_queue.write_buffer(
@@ -750,7 +746,7 @@ pub fn extract_terrain_mesh2d(
                 transforms,
                 material_bind_group_id: Material2dBindGroupId::default(),
                 automatic_batching: false,
-                // tag: 0, // For next version
+                tag: 0,
             },
         );
     }
@@ -764,7 +760,7 @@ pub fn queue_terrain_mesh2d<M: TerrainMaterial + 'static>(
     render_meshes: Res<RenderAssets<RenderMesh>>,
     render_mesh_instances: Res<RenderTerrainMeshInstances>,
     mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent2d>>,
-    views: Query<(Entity, &RenderVisibleEntities, &ExtractedView, &Msaa)>,
+    views: Query<(&RenderVisibleEntities, &ExtractedView, &Msaa)>,
 ) {
     trace!(
         "Queueing terrain mesh2d with {} instances",
@@ -778,8 +774,9 @@ pub fn queue_terrain_mesh2d<M: TerrainMaterial + 'static>(
     }
 
     // Iterate each view (a camera is a view)
-    for (view_entity, visible_entities, view, msaa) in &views {
-        let Some(transparent_phase) = transparent_render_phases.get_mut(&view_entity) else {
+    for (visible_entities, view, msaa) in &views {
+        let Some(transparent_phase) = transparent_render_phases.get_mut(&view.retained_view_entity)
+        else {
             continue;
         };
 
@@ -789,7 +786,7 @@ pub fn queue_terrain_mesh2d<M: TerrainMaterial + 'static>(
             | Mesh2dPipelineKey::from_hdr(view.hdr);
 
         // Queue all entities visible to that view
-        for (render_entity, visible_entity) in visible_entities.iter::<With<Mesh2d>>() {
+        for (render_entity, visible_entity) in visible_entities.iter::<Mesh2d>() {
             if let Some(mesh_instance) = render_mesh_instances.get(visible_entity) {
                 let mesh2d_handle = mesh_instance.mesh_asset_id;
                 let mesh2d_transforms = &mesh_instance.transforms;
@@ -825,7 +822,9 @@ pub fn queue_terrain_mesh2d<M: TerrainMaterial + 'static>(
                     sort_key: FloatOrd(mesh_z),
                     // This material is not batched
                     batch_range: 0..1,
-                    extra_index: PhaseItemExtraIndex::NONE,
+                    extra_index: PhaseItemExtraIndex::None,
+                    extracted_index: usize::MAX,
+                    indexed: mesh.indexed(),
                 });
             }
         }

@@ -1,8 +1,8 @@
 ﻿use std::marker::PhantomData;
-
+use bevy::ecs::component::Mutable;
 use bevy::ecs::system::SystemParam;
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use bevy::utils::HashMap;
 use bevy::render::render_resource::{AsBindGroup,ShaderRef};
 
 use super::ISLAND_CHUNK_SIZE;
@@ -35,7 +35,7 @@ pub struct TerrainChunkMap<CellData: TerrainCellData> {
     _phantom: PhantomData<CellData>,
 }
 
-pub trait ChunkCellAccessor<CellData: TerrainCellData>: CellAccessor<CellData> + Component {}
+pub trait ChunkCellAccessor<CellData: TerrainCellData>: CellAccessor<CellData> + Component<Mutability = Mutable> {}
 
 #[derive(SystemParam)]
 pub struct GlobalCellAccessor<'w, 's, CellData, Chunk>
