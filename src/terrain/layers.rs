@@ -11,46 +11,45 @@ pub trait TerrainMaterial: AsBindGroup + Clone + Sized + FromWorld + Send + Sync
     fn fragment_shader() -> ShaderRef { ShaderRef::Default }
 }
 
-pub trait TerrainCellData: Sized + Clone + Copy + Send + Sync {}
-
 #[derive(Debug)]
 pub enum CellAccessError {
     ChunkNotFound,
     ChunkAccessFailed,
 }
 
-pub trait CellAccessor<CellData: TerrainCellData>: {
-    fn get_cell(&self, pos: IVec2) -> Option<CellData>;
-    fn set_cell(&mut self, pos: IVec2, data: CellData) -> Result<(), CellAccessError>;
-    fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> Result<(), CellAccessError> where F: Fn(&mut CellData);
+pub trait CellAccessor: {
+    type CellData: Sized + Clone + Copy + Send + Sync;
+
+    fn get_cell(&self, pos: IVec2) -> Option<Self::CellData>;
+    fn set_cell(&mut self, pos: IVec2, data: Self::CellData) -> Result<(), CellAccessError>;
+    fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> Result<(), CellAccessError> where F: Fn(&mut Self::CellData);
     fn bulk_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError> 
-    where F: Fn(IVec2, IVec2, usize, &mut [CellData]);
+    where F: Fn(IVec2, IVec2, usize, &mut [Self::CellData]);
     fn parallel_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError> 
-    where F: Fn(IVec2, IVec2, usize, &mut [CellData]) + Send + Sync;
+    where F: Fn(IVec2, IVec2, usize, &mut [Self::CellData]) + Send + Sync;
 }
 
 #[derive(Resource, Default)]
-pub struct TerrainChunkMap<CellData: TerrainCellData> {
+pub struct TerrainChunkMap<Chunk: CellAccessor> {
     pub map: HashMap<IVec2, Entity>,
-    _phantom: PhantomData<CellData>,
+    _phantom: PhantomData<Chunk>,
 }
 
-pub trait ChunkCellAccessor<CellData: TerrainCellData>: CellAccessor<CellData> + Component<Mutability = Mutable> {}
+pub trait ChunkCellAccessor: CellAccessor + Component<Mutability = Mutable> {
+}
 
 #[derive(SystemParam)]
-pub struct GlobalCellAccessor<'w, 's, CellData, Chunk>
+pub struct GlobalCellAccessor<'w, 's, Chunk>
 where 
-    CellData: TerrainCellData + 'static,
-    Chunk: ChunkCellAccessor<CellData> + 'static,
+    Chunk: ChunkCellAccessor + 'static,
 {
     pub query: Query<'w, 's, &'static mut Chunk>,
-    pub chunk_map: ResMut<'w, TerrainChunkMap<CellData>>,
+    pub chunk_map: ResMut<'w, TerrainChunkMap<Chunk>>,
 }
 
-impl<'w, 's, CellData, Chunk> GlobalCellAccessor<'w, 's, CellData, Chunk>
+impl<'w, 's, Chunk> GlobalCellAccessor<'w, 's, Chunk>
 where
-    CellData: TerrainCellData + 'static,
-    Chunk: ChunkCellAccessor<CellData> + 'static,
+    Chunk: ChunkCellAccessor + 'static,
 {
     pub fn process_chunk_range<C>(
         &mut self,
@@ -119,12 +118,13 @@ where
     }
 }
 
-impl<'w, 's, CellData, Chunk> CellAccessor<CellData> for GlobalCellAccessor<'w, 's, CellData, Chunk>
+impl<'w, 's, Chunk> CellAccessor for GlobalCellAccessor<'w, 's, Chunk>
 where
-    CellData: TerrainCellData + 'static,
-    Chunk: ChunkCellAccessor<CellData> + 'static,
+    Chunk: ChunkCellAccessor + 'static,
 {
-    fn get_cell(&self, pos: IVec2) -> Option<CellData> {
+    type CellData = Chunk::CellData;
+
+    fn get_cell(&self, pos: IVec2) -> Option<Self::CellData> {
         let chunk_size = ISLAND_CHUNK_SIZE as i32;
         let chunk_pos = IVec2::new(
             pos.x.div_euclid(chunk_size),
@@ -146,7 +146,7 @@ where
         }
     }
 
-    fn set_cell(&mut self, pos: IVec2, data: CellData) -> Result<(), CellAccessError> {
+    fn set_cell(&mut self, pos: IVec2, data: Self::CellData) -> Result<(), CellAccessError> {
         let chunk_size = ISLAND_CHUNK_SIZE as i32;
         let chunk_pos = IVec2::new(
             pos.x.div_euclid(chunk_size),
@@ -170,7 +170,7 @@ where
 
     fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> Result<(), CellAccessError>
     where
-        F: Fn(&mut CellData)
+        F: Fn(&mut Self::CellData)
     {
         let chunk_size = ISLAND_CHUNK_SIZE as i32;
         let chunk_pos = IVec2::new(
@@ -194,7 +194,7 @@ where
     }
    
     fn bulk_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
-    where F: Fn(IVec2, IVec2, usize, &mut [CellData])
+    where F: Fn(IVec2, IVec2, usize, &mut [Self::CellData])
     {
         let op = &op;
         self.process_chunk_range(start_pos, end_pos_exclusive, |chunk, chunk_base, start, end| {
@@ -205,7 +205,7 @@ where
     }
 
     fn parallel_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
-    where F: Fn(IVec2, IVec2, usize, &mut [CellData]) + Send + Sync
+    where F: Fn(IVec2, IVec2, usize, &mut [Self::CellData]) + Send + Sync
     {
         let op = &op;
         self.process_chunk_range(start_pos, end_pos_exclusive, |chunk, chunk_base, start, end| {

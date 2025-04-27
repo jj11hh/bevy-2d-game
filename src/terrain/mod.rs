@@ -25,7 +25,6 @@ use bevy::sprite::{extract_mesh2d, Material2dBindGroupId, Mesh2dPipeline, Mesh2d
 use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
 use bevy::platform::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
-use layers::{CellAccessError, CellAccessor, TerrainChunkMap};
 use noise_functions::{Noise, OpenSimplex2};
 use std::mem::size_of;
 use strum::FromRepr;
@@ -35,7 +34,7 @@ mod base_material;
 mod draw;
 mod generation;
 
-use self::layers::{TerrainMaterial, TerrainCellData};
+use self::layers::{TerrainMaterial, CellAccessError, CellAccessor, TerrainChunkMap};
 use self::base_material::TerrainMaterialBaseLayer;
 use self::draw::*;
 use self::generation::*;
@@ -415,16 +414,15 @@ pub struct TerrainCellBaseLayer {
 #[component(storage = "SparseSet")]
 pub struct TerrainChunkChanged;
 
-#[derive(Component, Clone, Debug, Reflect)]
+#[derive(Component, Clone, Debug, Reflect, Default)]
 pub struct TerrainChunkBaseLayer {
     pos: IVec2,
     data: Vec<TerrainCellBaseLayer>,
 }
 
-impl TerrainCellData for TerrainCellBaseLayer {}
+impl CellAccessor for TerrainChunkBaseLayer {
 
-impl CellAccessor<TerrainCellBaseLayer> for TerrainChunkBaseLayer {
-
+    type CellData = TerrainCellBaseLayer;
 
     fn get_cell(&self, pos: IVec2) -> Option<TerrainCellBaseLayer> {
         if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
@@ -844,7 +842,7 @@ impl Plugin for Terrain2dPlugin {
             .init_resource::<TerrainChunkMesh>()
             .init_resource::<TerrainChunkRenderers>()
             .init_resource::<TerrainRenderMode>()
-            .init_resource::<TerrainChunkMap<TerrainCellBaseLayer>>()
+            .init_resource::<TerrainChunkMap<TerrainChunkBaseLayer>>()
             .add_systems(Startup, spawn_initial_chunks)
             .add_systems(Update, switch_render_mode)
             .add_observer(on_add_chunk::<TerrainChunkBaseLayer>)
