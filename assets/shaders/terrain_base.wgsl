@@ -38,10 +38,9 @@ struct TerrainMaterialUniform {
 @group(2) @binding(0) var<uniform> terrainMaterial: TerrainMaterialUniform;
 
 @group(2) @binding(1) var super_perlin_texture: texture_2d<f32>;
-@group(2) @binding(2) var super_perlin_sampler: sampler;
+@group(2) @binding(2) var grainy_texture: texture_2d<f32>;
 
-@group(2) @binding(3) var grainy_texture: texture_2d<f32>;
-@group(2) @binding(4) var grainy_sampler: sampler;
+@group(2) @binding(3) var texture_sampler: sampler;
 
 @group(3) @binding(0) var terrain_map_texture_rt: texture_2d<f32>;
 @group(3) @binding(1) var terrain_map_texture_lt: texture_2d<f32>;
@@ -50,7 +49,7 @@ struct TerrainMaterialUniform {
 @group(3) @binding(4) var terrain_map_sampler: sampler;
 
 fn rock(mesh: VertexOutput, tile_data: vec4<f32>) -> vec4<f32> {
-    let noise = textureSample(super_perlin_texture, super_perlin_sampler, mesh.world_position.xy * 0.25);
+    let noise = textureSample(super_perlin_texture, texture_sampler, mesh.world_position.xy * 0.25);
     let base_color = DEFAULT_ROCK_COLOR;
     let color = mix(base_color * 0.80, base_color, noise.r);
     return vec4<f32>(color, 1.0);
