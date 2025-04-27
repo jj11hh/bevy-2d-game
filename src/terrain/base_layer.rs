@@ -1,10 +1,183 @@
+use bevy::ecs::component::Component;
+use bevy::math::{IVec2, ivec2, vec2};
+use bevy::reflect::Reflect;
+use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
+use bytemuck::{Pod, Zeroable};
+use strum::FromRepr;
 use bevy::prelude::*;
 use noise_functions::modifiers::{Fbm, Frequency};
 use noise_functions::{Constant, Noise, OpenSimplex2, Sample};
-use bevy::math::vec2;
 
-use super::{TerrainBase, TerrainSurface, TerrainCellBaseLayer, TerrainChunkBaseLayer};
-use super::layers::CellAccessor;
+use super::layers::{CellAccessError, CellAccessor};
+
+/// Base terrain material that determines physical properties
+#[derive(Debug, PartialEq, FromRepr)]
+#[repr(u8)]
+pub enum TerrainBase {
+    Rock = 0,
+    Sand = 1,
+    Soil = 2,
+    Mud = 3,
+}
+
+impl Default for TerrainBase {
+    fn default() -> Self {
+        TerrainBase::Rock
+    }
+}
+
+/// Surface covering that determines visual appearance
+#[derive(Debug, PartialEq, FromRepr)]
+#[repr(u8)]
+pub enum TerrainSurface {
+    Bare = 0,
+    Water = 1,
+    Grass = 2,
+    Snow = 3,
+}
+
+impl Default for TerrainSurface {
+    fn default() -> Self {
+        TerrainSurface::Bare
+    }
+}
+
+#[derive(Debug, Default, Copy, Zeroable, Clone, Pod, Reflect)]
+#[repr(C)]
+pub struct TerrainCellBaseLayer {
+    pub height: u8,
+    pub base_type: u8,
+    pub surface_type: u8,
+    _padding: u8,
+}
+
+/// 标记地形块已更改，需要更新GPU纹理数据
+#[derive(Component, Clone, Debug, Default)]
+#[component(storage = "SparseSet")]
+pub struct TerrainChunkChanged;
+
+#[derive(Component, Clone, Debug, Reflect, Default)]
+pub struct TerrainChunkBaseLayer {
+    pub pos: IVec2,
+    pub data: Vec<TerrainCellBaseLayer>,
+}
+
+impl CellAccessor for TerrainChunkBaseLayer {
+
+    type CellData = TerrainCellBaseLayer;
+
+    fn get_cell(&self, pos: IVec2) -> Option<TerrainCellBaseLayer> {
+        if pos.x < 0 || pos.x > (super::ISLAND_CHUNK_SIZE as i32)
+        || pos.y < 0 || pos.y > (super::ISLAND_CHUNK_SIZE as i32) {
+            return None;
+        }
+        else {
+            return Some(self.data[(pos.y as usize) * super::ISLAND_CHUNK_SIZE as usize + (pos.x as usize)]);
+        }
+    }
+
+    fn set_cell(&mut self, pos: IVec2, data: TerrainCellBaseLayer) -> Result<(), CellAccessError> {
+        if pos.x < 0 || pos.x > (super::ISLAND_CHUNK_SIZE as i32)
+        || pos.y < 0 || pos.y > (super::ISLAND_CHUNK_SIZE as i32) {
+            Err(CellAccessError::ChunkAccessFailed)
+        }
+        else {
+            self.data[(pos.y as usize) * super::ISLAND_CHUNK_SIZE as usize + (pos.x as usize)] = data;
+            Ok(())
+        }
+    }
+
+    fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> Result<(), CellAccessError>
+    where F: Fn(&mut TerrainCellBaseLayer) {
+        if pos.x < 0 || pos.x > (super::ISLAND_CHUNK_SIZE as i32)
+        || pos.y < 0 || pos.y > (super::ISLAND_CHUNK_SIZE as i32) {
+            Err(CellAccessError::ChunkAccessFailed)
+        }
+        else {
+            let data = &mut self.data[(pos.y as usize) * super::ISLAND_CHUNK_SIZE as usize + (pos.x as usize)];
+            op(data);
+            Ok(())
+        }
+    }
+
+    fn bulk_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
+    where
+        F: Fn(IVec2, IVec2, usize, &mut [TerrainCellBaseLayer])
+    {
+        // Check bounds
+        if start_pos.x < 0 || start_pos.y < 0
+            || end_pos_exclusive.x > super::ISLAND_CHUNK_SIZE as i32
+            || end_pos_exclusive.y > super::ISLAND_CHUNK_SIZE as i32
+            || start_pos.x > end_pos_exclusive.x
+            || start_pos.y > end_pos_exclusive.y
+        {
+            return Err(CellAccessError::ChunkAccessFailed);
+        }
+
+        let chunk_width = super::ISLAND_CHUNK_SIZE as usize;
+        let stride = chunk_width;
+        let data_slice = &mut self.data.as_mut_slice()[
+            start_pos.y as usize * chunk_width + start_pos.x as usize..
+            (end_pos_exclusive.y - 1) as usize * chunk_width + end_pos_exclusive.x as usize
+        ];
+
+        op(start_pos, end_pos_exclusive, stride, data_slice);
+
+        Ok(())
+    }
+
+    fn parallel_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
+    where
+        F: Fn(IVec2, IVec2, usize, &mut [TerrainCellBaseLayer]) + Send + Sync
+    {
+        // Check bounds
+        if start_pos.x < 0 || start_pos.y < 0
+            || end_pos_exclusive.x > super::ISLAND_CHUNK_SIZE as i32
+            || end_pos_exclusive.y > super::ISLAND_CHUNK_SIZE as i32
+            || start_pos.x > end_pos_exclusive.x
+            || start_pos.y > end_pos_exclusive.y
+        {
+            return Err(CellAccessError::ChunkAccessFailed);
+        }
+
+        let chunk_width = super::ISLAND_CHUNK_SIZE as usize;
+        let stride = chunk_width;
+        let mut data_slice = &mut self.data.as_mut_slice()[
+            start_pos.y as usize * chunk_width + start_pos.x as usize..
+            (end_pos_exclusive.y - 1) as usize * chunk_width + end_pos_exclusive.x as usize
+        ];
+
+        data_slice.par_chunk_map_mut(ComputeTaskPool::get(), stride, |chunk_index, chunk_data| {
+            let y = start_pos.y + (chunk_index as i32);
+            op(ivec2(start_pos.x, y), ivec2(end_pos_exclusive.x, y + 1), stride, chunk_data)
+        });
+
+        Ok(())
+    }
+}
+
+pub trait AsTextureProvider {
+    fn provide_texture<F>(&self, callback: F) where F: Fn(&[u8]);
+}
+
+impl AsTextureProvider for TerrainChunkBaseLayer {
+    fn provide_texture<F>(&self, callback: F) where F: Fn(&[u8]) {
+        callback(bytemuck::cast_slice(&self.data));
+    }
+}
+
+pub trait GetChunkPos {
+    fn get_pos(&self) -> IVec2;
+}
+
+impl GetChunkPos for TerrainChunkBaseLayer {
+    fn get_pos(&self) -> IVec2 { return self.pos; }
+}
+
+
+// ******************************
+// ** Base Layer Generation
+// ******************************
 
 const RANDOM_SEED: u32 = 1;
 const SEA_LEVEL: f32 = 64.0f32;
@@ -22,7 +195,7 @@ pub struct NoiseSource<T> {
 /// # Parameters
 /// * `chunk_data` - Vector to populate with terrain cell data
 /// * `noise_source` - Primary noise source for height generation
-pub fn generate_tiles(
+pub fn generate_base_layer(
     id: IVec2,
     chunk_data: &mut TerrainChunkBaseLayer,
     noise_source: &NoiseSource<Frequency<Fbm<OpenSimplex2>, Constant>>,
@@ -152,16 +325,16 @@ pub fn generate_tiles(
     }).unwrap();
 }
 
-pub struct SpawnTilemapCommand {
+pub struct SpawnBaseLayerCommand {
     pub pos: IVec2
 }
 
-impl Command for SpawnTilemapCommand {
+impl Command for SpawnBaseLayerCommand {
     fn apply(self, world: &mut World) {
         let chunk_data = vec![TerrainCellBaseLayer::default(); (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
         let mut chunk = TerrainChunkBaseLayer { pos: self.pos, data: chunk_data, };
         let noise_source = world.resource();
-        generate_tiles(self.pos, &mut chunk, noise_source);
+        generate_base_layer(self.pos, &mut chunk, noise_source);
         world.spawn(chunk);
     }
 }

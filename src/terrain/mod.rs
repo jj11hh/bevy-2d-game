@@ -3,7 +3,7 @@ use bevy::core_pipeline::core_2d::Transparent2d;
 use bevy::ecs::entity::EntityHash;
 use bevy::ecs::system::{StaticSystemParam, SystemState};
 use bevy::image::{ImageSampler, TextureFormatPixelInfo};
-use bevy::math::{ivec2, vec3, FloatOrd};
+use bevy::math::{vec3, FloatOrd};
 use bevy::pbr::MeshFlags;
 use bevy::prelude::*;
 use bevy::render::batching::NoAutomaticBatching;
@@ -22,22 +22,18 @@ use bevy::render::view::{ExtractedView, RenderVisibleEntities};
 use bevy::render::{Extract, Render, RenderApp, RenderSet};
 use bevy::render::sync_world::MainEntityHashMap;
 use bevy::sprite::{extract_mesh2d, Material2dBindGroupId, Mesh2dPipeline, Mesh2dPipelineKey, Mesh2dTransforms, RenderMesh2dInstance};
-use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
 use bevy::platform::collections::HashMap;
-use bytemuck::{Pod, Zeroable};
 use noise_functions::{Noise, OpenSimplex2};
-use std::mem::size_of;
-use strum::FromRepr;
 
 mod layers;
 mod base_material;
 mod draw;
-mod generation;
+mod base_layer;
 
-use self::layers::{TerrainMaterial, CellAccessError, CellAccessor, TerrainChunkMap};
+use self::layers::{TerrainMaterial, TerrainChunkMap};
+use self::base_layer::*;
 use self::base_material::TerrainMaterialBaseLayer;
 use self::draw::*;
-use self::generation::*;
 
 pub type DrawTerrainBaseMesh2d = DrawTerrainMesh2d<TerrainMaterialBaseLayer>;
 
@@ -368,171 +364,6 @@ impl<M: TerrainMaterial> SpecializedMeshPipeline for TerrainPipeline<M> {
     }
 }
 
-/// Base terrain material that determines physical properties
-#[derive(Debug, PartialEq, FromRepr)]
-#[repr(u8)]
-pub enum TerrainBase {
-    Rock = 0,
-    Sand = 1,
-    Soil = 2,
-    Mud = 3,
-}
-
-impl Default for TerrainBase {
-    fn default() -> Self {
-        TerrainBase::Rock
-    }
-}
-
-/// Surface covering that determines visual appearance
-#[derive(Debug, PartialEq, FromRepr)]
-#[repr(u8)]
-pub enum TerrainSurface {
-    Bare = 0,
-    Water = 1,
-    Grass = 2,
-    Snow = 3,
-}
-
-impl Default for TerrainSurface {
-    fn default() -> Self {
-        TerrainSurface::Bare
-    }
-}
-
-#[derive(Debug, Default, Copy, Zeroable, Clone, Pod, Reflect)]
-#[repr(C)]
-pub struct TerrainCellBaseLayer {
-    height: u8,
-    base_type: u8,
-    surface_type: u8,
-    _padding: u8,
-}
-
-/// 标记地形块已更改，需要更新GPU纹理数据
-#[derive(Component, Clone, Debug, Default)]
-#[component(storage = "SparseSet")]
-pub struct TerrainChunkChanged;
-
-#[derive(Component, Clone, Debug, Reflect, Default)]
-pub struct TerrainChunkBaseLayer {
-    pos: IVec2,
-    data: Vec<TerrainCellBaseLayer>,
-}
-
-impl CellAccessor for TerrainChunkBaseLayer {
-
-    type CellData = TerrainCellBaseLayer;
-
-    fn get_cell(&self, pos: IVec2) -> Option<TerrainCellBaseLayer> {
-        if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
-        || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
-            return None;
-        }
-        else {
-            return Some(self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)]);
-        }
-    }
-
-    fn set_cell(&mut self, pos: IVec2, data: TerrainCellBaseLayer) -> Result<(), CellAccessError> {
-        if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
-        || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
-            Err(CellAccessError::ChunkAccessFailed)
-        }
-        else {
-            self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)] = data;
-            Ok(())
-        }
-    }
-
-    fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> Result<(), CellAccessError> 
-    where F: Fn(&mut TerrainCellBaseLayer) {
-        if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
-        || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
-            Err(CellAccessError::ChunkAccessFailed)
-        }
-        else {
-            let data = &mut self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)];
-            op(data);
-            Ok(())
-        }
-    }
-
-    fn bulk_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
-    where
-        F: Fn(IVec2, IVec2, usize, &mut [TerrainCellBaseLayer])
-    {
-        // Check bounds
-        if start_pos.x < 0 || start_pos.y < 0
-            || end_pos_exclusive.x > ISLAND_CHUNK_SIZE as i32
-            || end_pos_exclusive.y > ISLAND_CHUNK_SIZE as i32
-            || start_pos.x > end_pos_exclusive.x
-            || start_pos.y > end_pos_exclusive.y
-        {
-            return Err(CellAccessError::ChunkAccessFailed);
-        }
-
-        let chunk_width = ISLAND_CHUNK_SIZE as usize;
-        let stride = chunk_width;
-        let data_slice = &mut self.data.as_mut_slice()[
-            start_pos.y as usize * chunk_width + start_pos.x as usize..
-            (end_pos_exclusive.y - 1) as usize * chunk_width + end_pos_exclusive.x as usize
-        ];
-
-        op(start_pos, end_pos_exclusive, stride, data_slice);
-
-        Ok(())
-    }
-
-    fn parallel_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
-    where
-        F: Fn(IVec2, IVec2, usize, &mut [TerrainCellBaseLayer]) + Send + Sync
-    {
-        // Check bounds
-        if start_pos.x < 0 || start_pos.y < 0
-            || end_pos_exclusive.x > ISLAND_CHUNK_SIZE as i32
-            || end_pos_exclusive.y > ISLAND_CHUNK_SIZE as i32
-            || start_pos.x > end_pos_exclusive.x
-            || start_pos.y > end_pos_exclusive.y
-        {
-            return Err(CellAccessError::ChunkAccessFailed);
-        }
-
-        let chunk_width = ISLAND_CHUNK_SIZE as usize;
-        let stride = chunk_width;
-        let mut data_slice = &mut self.data.as_mut_slice()[
-            start_pos.y as usize * chunk_width + start_pos.x as usize..
-            (end_pos_exclusive.y - 1) as usize * chunk_width + end_pos_exclusive.x as usize
-        ];
-
-        data_slice.par_chunk_map_mut(ComputeTaskPool::get(), stride, |chunk_index, chunk_data| {
-            let y = start_pos.y + (chunk_index as i32);
-            op(ivec2(start_pos.x, y), ivec2(end_pos_exclusive.x, y + 1), stride, chunk_data)
-        });
-
-        // op(start_pos, end_pos_exclusive, stride, data_slice);
-
-        Ok(())
-    }
-}
-
-pub trait AsTextureProvider {
-    fn provide_texture<F>(&self, callback: F) where F: Fn(&[u8]);
-}
-
-impl AsTextureProvider for TerrainChunkBaseLayer {
-    fn provide_texture<F>(&self, callback: F) where F: Fn(&[u8]) {
-        callback(bytemuck::cast_slice(&self.data));
-    }
-}
-
-pub trait GetChunkPos {
-    fn get_pos(&self) -> IVec2;
-}
-
-impl GetChunkPos for TerrainChunkBaseLayer {
-    fn get_pos(&self) -> IVec2 { return self.pos; }
-}
 
 #[derive(Component, Clone, Debug, Reflect, ExtractComponent)]
 pub struct TerrainChunkRenderer {
@@ -550,10 +381,10 @@ impl TerrainChunkRenderer {
 pub fn spawn_initial_chunks(
     mut commands: Commands,
 ) {
-    commands.queue(SpawnTilemapCommand { pos: IVec2::new(0, 0) });
-    commands.queue(SpawnTilemapCommand { pos: IVec2::new(-1, 0) });
-    commands.queue(SpawnTilemapCommand { pos: IVec2::new(-1, -1) });
-    commands.queue(SpawnTilemapCommand { pos: IVec2::new(0, -1) });
+    commands.queue(SpawnBaseLayerCommand { pos: IVec2::new(0, 0) });
+    commands.queue(SpawnBaseLayerCommand { pos: IVec2::new(-1, 0) });
+    commands.queue(SpawnBaseLayerCommand { pos: IVec2::new(-1, -1) });
+    commands.queue(SpawnBaseLayerCommand { pos: IVec2::new(0, -1) });
 }
 
 #[derive(Resource, Default, Debug, Reflect)]
