@@ -67,34 +67,34 @@ impl CellAccessor for TerrainChunkBaseLayer {
     type CellData = TerrainCellBaseLayer;
 
     fn get_cell(&self, pos: IVec2) -> Option<TerrainCellBaseLayer> {
-        if pos.x < 0 || pos.x > (super::ISLAND_CHUNK_SIZE as i32)
-        || pos.y < 0 || pos.y > (super::ISLAND_CHUNK_SIZE as i32) {
+        if pos.x < 0 || pos.x >= (ISLAND_CHUNK_SIZE as i32)
+        || pos.y < 0 || pos.y >= (ISLAND_CHUNK_SIZE as i32) {
             return None;
         }
         else {
-            return Some(self.data[(pos.y as usize) * super::ISLAND_CHUNK_SIZE as usize + (pos.x as usize)]);
+            return Some(self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)]);
         }
     }
 
     fn set_cell(&mut self, pos: IVec2, data: TerrainCellBaseLayer) -> Result<(), CellAccessError> {
-        if pos.x < 0 || pos.x > (super::ISLAND_CHUNK_SIZE as i32)
-        || pos.y < 0 || pos.y > (super::ISLAND_CHUNK_SIZE as i32) {
+        if pos.x < 0 || pos.x >= (ISLAND_CHUNK_SIZE as i32)
+        || pos.y < 0 || pos.y >= (ISLAND_CHUNK_SIZE as i32) {
             Err(CellAccessError::ChunkAccessFailed)
         }
         else {
-            self.data[(pos.y as usize) * super::ISLAND_CHUNK_SIZE as usize + (pos.x as usize)] = data;
+            self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)] = data;
             Ok(())
         }
     }
 
     fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> Result<(), CellAccessError>
     where F: Fn(&mut TerrainCellBaseLayer) {
-        if pos.x < 0 || pos.x > (super::ISLAND_CHUNK_SIZE as i32)
-        || pos.y < 0 || pos.y > (super::ISLAND_CHUNK_SIZE as i32) {
+        if pos.x < 0 || pos.x >= (ISLAND_CHUNK_SIZE as i32)
+        || pos.y < 0 || pos.y >= (ISLAND_CHUNK_SIZE as i32) {
             Err(CellAccessError::ChunkAccessFailed)
         }
         else {
-            let data = &mut self.data[(pos.y as usize) * super::ISLAND_CHUNK_SIZE as usize + (pos.x as usize)];
+            let data = &mut self.data[(pos.y as usize) * ISLAND_CHUNK_SIZE as usize + (pos.x as usize)];
             op(data);
             Ok(())
         }
@@ -106,15 +106,15 @@ impl CellAccessor for TerrainChunkBaseLayer {
     {
         // Check bounds
         if start_pos.x < 0 || start_pos.y < 0
-            || end_pos_exclusive.x > super::ISLAND_CHUNK_SIZE as i32
-            || end_pos_exclusive.y > super::ISLAND_CHUNK_SIZE as i32
-            || start_pos.x > end_pos_exclusive.x
-            || start_pos.y > end_pos_exclusive.y
+            || end_pos_exclusive.x > ISLAND_CHUNK_SIZE as i32
+            || end_pos_exclusive.y > ISLAND_CHUNK_SIZE as i32
+            || start_pos.x >= end_pos_exclusive.x
+            || start_pos.y >= end_pos_exclusive.y
         {
             return Err(CellAccessError::ChunkAccessFailed);
         }
 
-        let chunk_width = super::ISLAND_CHUNK_SIZE as usize;
+        let chunk_width = ISLAND_CHUNK_SIZE as usize;
         let stride = chunk_width;
         let data_slice = &mut self.data.as_mut_slice()[
             start_pos.y as usize * chunk_width + start_pos.x as usize..
@@ -132,15 +132,15 @@ impl CellAccessor for TerrainChunkBaseLayer {
     {
         // Check bounds
         if start_pos.x < 0 || start_pos.y < 0
-            || end_pos_exclusive.x > super::ISLAND_CHUNK_SIZE as i32
-            || end_pos_exclusive.y > super::ISLAND_CHUNK_SIZE as i32
-            || start_pos.x > end_pos_exclusive.x
-            || start_pos.y > end_pos_exclusive.y
+            || end_pos_exclusive.x > ISLAND_CHUNK_SIZE as i32
+            || end_pos_exclusive.y > ISLAND_CHUNK_SIZE as i32
+            || start_pos.x >= end_pos_exclusive.x
+            || start_pos.y >= end_pos_exclusive.y
         {
             return Err(CellAccessError::ChunkAccessFailed);
         }
 
-        let chunk_width = super::ISLAND_CHUNK_SIZE as usize;
+        let chunk_width = ISLAND_CHUNK_SIZE as usize;
         let stride = chunk_width;
         let mut data_slice = &mut self.data.as_mut_slice()[
             start_pos.y as usize * chunk_width + start_pos.x as usize..
