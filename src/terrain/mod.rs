@@ -59,7 +59,7 @@ pub struct TerrainRenderMode {
 }
 
 
-pub fn extract_terrain_chunk<TrunkType: AsTextureProvider + Component>(
+pub fn extract_terrain_chunk<ChunkType: AsTextureProvider + Component>(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -68,7 +68,7 @@ pub fn extract_terrain_chunk<TrunkType: AsTextureProvider + Component>(
         Query<(
             Entity,
             &RenderEntity,
-            &TrunkType,
+            &ChunkType,
             Option<&TerrainChunkChanged>,
         )>,
     >,
