@@ -91,7 +91,7 @@ impl AsBindGroup for TerrainBaseMaterial {
         _layout: &BindGroupLayout,
         render_device: &RenderDevice,
         (images, fallback_image): &mut SystemParamItem<'_, '_, Self::Param>,
-        force_no_bindless: bool,
+        _: bool,
     ) -> Result<UnpreparedBindGroup<Self::Data>, AsBindGroupError> {
         let mut bindings = Vec::new();
 
@@ -159,7 +159,7 @@ impl AsBindGroup for TerrainBaseMaterial {
         Ok(UnpreparedBindGroup { bindings: BindingResources(bindings), data: () })
     }
 
-    fn bind_group_layout_entries(_render_device: &RenderDevice, force_no_bindless: bool) -> Vec<BindGroupLayoutEntry> {
+    fn bind_group_layout_entries(_render_device: &RenderDevice, _: bool) -> Vec<BindGroupLayoutEntry> {
         vec![
             // Uniform buffer
             BindGroupLayoutEntry {

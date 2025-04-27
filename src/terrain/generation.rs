@@ -3,7 +3,7 @@ use noise_functions::modifiers::{Fbm, Frequency};
 use noise_functions::{Constant, Noise, OpenSimplex2, Sample};
 use bevy::math::vec2;
 
-use super::{TerrainBase, TerrainSurface, TerrainBaseCell, TerrainChunk};
+use super::{TerrainBase, TerrainSurface, TerrainCellBaseLayer, TerrainChunkBaseLayer};
 use super::layers::CellAccessor;
 
 const RANDOM_SEED: u32 = 1;
@@ -24,7 +24,7 @@ pub struct NoiseSource<T> {
 /// * `noise_source` - Primary noise source for height generation
 pub fn generate_tiles(
     id: IVec2,
-    chunk_data: &mut TerrainChunk,
+    chunk_data: &mut TerrainChunkBaseLayer,
     noise_source: &NoiseSource<Frequency<Fbm<OpenSimplex2>, Constant>>,
 ) {
     // let center = vec2( ISLAND_CHUNK_SIZE as f32 / 2.0f32, ISLAND_CHUNK_SIZE as f32 / 2.0f32, );
@@ -158,8 +158,8 @@ pub struct SpawnTilemapCommand {
 
 impl Command for SpawnTilemapCommand {
     fn apply(self, world: &mut World) {
-        let chunk_data = vec![TerrainBaseCell::default(); (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
-        let mut chunk = TerrainChunk { pos: self.pos, data: chunk_data, };
+        let chunk_data = vec![TerrainCellBaseLayer::default(); (ISLAND_CHUNK_SIZE * ISLAND_CHUNK_SIZE) as usize];
+        let mut chunk = TerrainChunkBaseLayer { pos: self.pos, data: chunk_data, };
         let noise_source = world.resource();
         generate_tiles(self.pos, &mut chunk, noise_source);
         world.spawn(chunk);

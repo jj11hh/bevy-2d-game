@@ -2,9 +2,7 @@ use bevy::asset::Assets;
 use bevy::core_pipeline::core_2d::Transparent2d;
 use bevy::ecs::entity::EntityHash;
 use bevy::ecs::system::{StaticSystemParam, SystemState};
-use bevy::image::{
-    ImageSampler, TextureFormatPixelInfo,
-};
+use bevy::image::{ImageSampler, TextureFormatPixelInfo};
 use bevy::math::{ivec2, vec3, FloatOrd};
 use bevy::pbr::MeshFlags;
 use bevy::prelude::*;
@@ -13,9 +11,7 @@ use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::mesh::{MeshVertexBufferLayoutRef, RenderMesh};
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_phase::{
-    AddRenderCommand, DrawFunctions, PhaseItemExtraIndex, ViewSortedRenderPhases,
-};
+use bevy::render::render_phase::{AddRenderCommand, DrawFunctions, PhaseItemExtraIndex, ViewSortedRenderPhases};
 use bevy::render::render_resource::binding_types::{sampler, texture_2d};
 use bevy::render::render_resource::{AddressMode, AsBindGroup, BindGroupEntries, BindGroupLayoutEntries, DefaultImageSampler, Extent3d, FilterMode, IntoBinding, OwnedBindingResource, PipelineCache, RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderRef, ShaderStages, SpecializedMeshPipeline, SpecializedMeshPipelineError, SpecializedMeshPipelines, TexelCopyBufferLayout, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
@@ -25,10 +21,7 @@ use bevy::render::texture::GpuImage;
 use bevy::render::view::{ExtractedView, RenderVisibleEntities};
 use bevy::render::{Extract, Render, RenderApp, RenderSet};
 use bevy::render::sync_world::MainEntityHashMap;
-use bevy::sprite::{
-    extract_mesh2d, Material2dBindGroupId, Mesh2dPipeline, Mesh2dPipelineKey,
-    Mesh2dTransforms, RenderMesh2dInstance,
-};
+use bevy::sprite::{extract_mesh2d, Material2dBindGroupId, Mesh2dPipeline, Mesh2dPipelineKey, Mesh2dTransforms, RenderMesh2dInstance};
 use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
 use bevy::platform::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
@@ -100,7 +93,7 @@ pub fn extract_terrain_chunk<TrunkType: AsTextureProvider + Component>(
         }
 
         // Convert terrain data to texture format
-        let format_size = size_of::<TerrainBaseCell>();
+        let format_size = size_of::<TerrainCellBaseLayer>();
 
         // Update existing texture if data exists, otherwise create a new one
         if changed.is_some() && data_store.contains_key(&main_entity) {
@@ -165,7 +158,7 @@ pub fn extract_terrain_chunk<TrunkType: AsTextureProvider + Component>(
             });
 
             // Write texture data to GPU
-            let format_size = size_of::<TerrainBaseCell>();
+            let format_size = size_of::<TerrainCellBaseLayer>();
             terrain_chunk.provide_texture(|image_data| {
                 render_queue.write_texture(
                     texture.as_image_copy(),
@@ -410,7 +403,7 @@ impl Default for TerrainSurface {
 
 #[derive(Debug, Default, Copy, Zeroable, Clone, Pod, Reflect)]
 #[repr(C)]
-pub struct TerrainBaseCell {
+pub struct TerrainCellBaseLayer {
     height: u8,
     base_type: u8,
     surface_type: u8,
@@ -423,15 +416,17 @@ pub struct TerrainBaseCell {
 pub struct TerrainChunkChanged;
 
 #[derive(Component, Clone, Debug, Reflect)]
-pub struct TerrainChunk {
+pub struct TerrainChunkBaseLayer {
     pos: IVec2,
-    data: Vec<TerrainBaseCell>,
+    data: Vec<TerrainCellBaseLayer>,
 }
 
-impl TerrainCellData for TerrainBaseCell {}
+impl TerrainCellData for TerrainCellBaseLayer {}
 
-impl CellAccessor<TerrainBaseCell> for TerrainChunk {
-    fn get_cell(&self, pos: IVec2) -> Option<TerrainBaseCell> {
+impl CellAccessor<TerrainCellBaseLayer> for TerrainChunkBaseLayer {
+
+
+    fn get_cell(&self, pos: IVec2) -> Option<TerrainCellBaseLayer> {
         if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
         || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
             return None;
@@ -441,7 +436,7 @@ impl CellAccessor<TerrainBaseCell> for TerrainChunk {
         }
     }
 
-    fn set_cell(&mut self, pos: IVec2, data: TerrainBaseCell) -> Result<(), CellAccessError> {
+    fn set_cell(&mut self, pos: IVec2, data: TerrainCellBaseLayer) -> Result<(), CellAccessError> {
         if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
         || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
             Err(CellAccessError::ChunkAccessFailed)
@@ -453,7 +448,7 @@ impl CellAccessor<TerrainBaseCell> for TerrainChunk {
     }
 
     fn modify_cell<F>(&mut self, pos: IVec2, op: F) -> Result<(), CellAccessError> 
-    where F: Fn(&mut TerrainBaseCell) {
+    where F: Fn(&mut TerrainCellBaseLayer) {
         if pos.x < 0 || pos.x > (ISLAND_CHUNK_SIZE as i32)
         || pos.y < 0 || pos.y > (ISLAND_CHUNK_SIZE as i32) {
             Err(CellAccessError::ChunkAccessFailed)
@@ -467,7 +462,7 @@ impl CellAccessor<TerrainBaseCell> for TerrainChunk {
 
     fn bulk_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
     where
-        F: Fn(IVec2, IVec2, usize, &mut [TerrainBaseCell])
+        F: Fn(IVec2, IVec2, usize, &mut [TerrainCellBaseLayer])
     {
         // Check bounds
         if start_pos.x < 0 || start_pos.y < 0
@@ -493,7 +488,7 @@ impl CellAccessor<TerrainBaseCell> for TerrainChunk {
 
     fn parallel_access<F>(&mut self, start_pos: IVec2, end_pos_exclusive: IVec2, op: F) -> Result<(), CellAccessError>
     where
-        F: Fn(IVec2, IVec2, usize, &mut [TerrainBaseCell]) + Send + Sync
+        F: Fn(IVec2, IVec2, usize, &mut [TerrainCellBaseLayer]) + Send + Sync
     {
         // Check bounds
         if start_pos.x < 0 || start_pos.y < 0
@@ -527,7 +522,7 @@ pub trait AsTextureProvider {
     fn provide_texture<F>(&self, callback: F) where F: Fn(&[u8]);
 }
 
-impl AsTextureProvider for TerrainChunk {
+impl AsTextureProvider for TerrainChunkBaseLayer {
     fn provide_texture<F>(&self, callback: F) where F: Fn(&[u8]) {
         callback(bytemuck::cast_slice(&self.data));
     }
@@ -537,7 +532,7 @@ pub trait GetChunkPos {
     fn get_pos(&self) -> IVec2;
 }
 
-impl GetChunkPos for TerrainChunk {
+impl GetChunkPos for TerrainChunkBaseLayer {
     fn get_pos(&self) -> IVec2 { return self.pos; }
 }
 
@@ -840,7 +835,7 @@ impl Plugin for Terrain2dPlugin {
             .fbm(4, 0.5, 2.0)
             .frequency(2.4 / ISLAND_RADIUS);
 
-        app.add_plugins(SyncComponentPlugin::<TerrainChunk>::default());
+        app.add_plugins(SyncComponentPlugin::<TerrainChunkBaseLayer>::default());
         app.add_plugins(ExtractResourcePlugin::<TerrainRenderMode>::default());
         app.add_plugins(ExtractComponentPlugin::<TerrainChunkRenderer>::default());
         app.register_type::<TerrainChunkRenderer>();
@@ -849,11 +844,11 @@ impl Plugin for Terrain2dPlugin {
             .init_resource::<TerrainChunkMesh>()
             .init_resource::<TerrainChunkRenderers>()
             .init_resource::<TerrainRenderMode>()
-            .init_resource::<TerrainChunkMap<TerrainBaseCell>>()
+            .init_resource::<TerrainChunkMap<TerrainCellBaseLayer>>()
             .add_systems(Startup, spawn_initial_chunks)
             .add_systems(Update, switch_render_mode)
-            .add_observer(on_add_chunk::<TerrainChunk>)
-            .add_observer(on_remove_chunk::<TerrainChunk>);
+            .add_observer(on_add_chunk::<TerrainChunkBaseLayer>)
+            .add_observer(on_remove_chunk::<TerrainChunkBaseLayer>);
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
@@ -866,7 +861,7 @@ impl Plugin for Terrain2dPlugin {
                 .add_systems(
                     ExtractSchedule,
                     (
-                        extract_terrain_chunk::<TerrainChunk>,
+                        extract_terrain_chunk::<TerrainChunkBaseLayer>,
                         extract_terrain_mesh2d.after(extract_mesh2d),
                     ),
                 )
