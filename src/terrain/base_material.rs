@@ -40,17 +40,17 @@ impl Default for TerrainBaseMaterialUniform {
 }
 
 #[derive(TypePath, Debug, Clone)]
-pub(crate) struct TerrainBaseMaterial {
+pub(crate) struct TerrainMaterialBaseLayer {
     pub material_uniform: TerrainBaseMaterialUniform,
     pub super_perlin_rock: Option<Handle<Image>>,
     pub grainy_texture: Option<Handle<Image>>,
 }
 
-impl TerrainMaterial for TerrainBaseMaterial {
+impl TerrainMaterial for TerrainMaterialBaseLayer {
     fn fragment_shader() -> ShaderRef { TERRAIN_SHADER_PATH.into() }
 }
 
-impl FromWorld for TerrainBaseMaterial {
+impl FromWorld for TerrainMaterialBaseLayer {
     fn from_world(world: &mut World) -> Self {
         let image_repeat_settings = |s: &mut _| {
             *s = ImageLoaderSettings {
@@ -63,7 +63,7 @@ impl FromWorld for TerrainBaseMaterial {
             }
         };
 
-        TerrainBaseMaterial {
+        TerrainMaterialBaseLayer {
             material_uniform: TerrainBaseMaterialUniform::default(),
             super_perlin_rock: Some(
                 world
@@ -76,7 +76,7 @@ impl FromWorld for TerrainBaseMaterial {
     }
 }
 
-impl AsBindGroup for TerrainBaseMaterial {
+impl AsBindGroup for TerrainMaterialBaseLayer {
     type Data = ();
     type Param = (SRes<RenderAssets<GpuImage>>, SRes<FallbackImage>);
 

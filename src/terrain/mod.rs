@@ -36,11 +36,11 @@ mod draw;
 mod generation;
 
 use self::layers::{TerrainMaterial, TerrainCellData};
-use self::base_material::TerrainBaseMaterial;
+use self::base_material::TerrainMaterialBaseLayer;
 use self::draw::*;
 use self::generation::*;
 
-pub type DrawTerrainBaseMesh2d = DrawTerrainMesh2d<TerrainBaseMaterial>;
+pub type DrawTerrainBaseMesh2d = DrawTerrainMesh2d<TerrainMaterialBaseLayer>;
 
 #[derive(Resource, Deref, DerefMut, Default)]
 pub struct TerrainPerChunkDataStore(pub MainEntityHashMap<TerrainPerChunkData>);
@@ -683,7 +683,7 @@ fn switch_render_mode(
 fn update_material_uniforms(
     time: Res<Time>,
     render_mode: Res<TerrainRenderMode>,
-    terrain_pipeline: ResMut<TerrainPipeline<TerrainBaseMaterial>>,
+    terrain_pipeline: ResMut<TerrainPipeline<TerrainMaterialBaseLayer>>,
     render_queue: Res<RenderQueue>,
 ) {
     trace!(
@@ -853,7 +853,7 @@ impl Plugin for Terrain2dPlugin {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .add_render_command::<Transparent2d, DrawTerrainBaseMesh2d>()
-                .init_resource::<SpecializedMeshPipelines<TerrainPipeline<TerrainBaseMaterial>>>()
+                .init_resource::<SpecializedMeshPipelines<TerrainPipeline<TerrainMaterialBaseLayer>>>()
                 .init_resource::<TerrainRendererVersions>()
                 .init_resource::<RenderTerrainMeshInstances>()
                 .init_resource::<TerrainPerChunkDataStore>()
@@ -870,9 +870,9 @@ impl Plugin for Terrain2dPlugin {
                     (
                         update_material_uniforms,
                         bind_terrain_material.in_set(RenderSet::PrepareBindGroups),
-                        prepare_terrain_bind_group::<TerrainBaseMaterial>
+                        prepare_terrain_bind_group::<TerrainMaterialBaseLayer>
                             .in_set(RenderSet::PrepareBindGroups),
-                        queue_terrain_mesh2d::<TerrainBaseMaterial>.in_set(RenderSet::QueueMeshes),
+                        queue_terrain_mesh2d::<TerrainMaterialBaseLayer>.in_set(RenderSet::QueueMeshes),
                     ),
                 );
         }
@@ -882,14 +882,14 @@ impl Plugin for Terrain2dPlugin {
         trace!("Finishing Terrain2dPlugin setup");
         app.get_sub_app_mut(RenderApp)
             .unwrap()
-            .init_resource::<TerrainPipeline<TerrainBaseMaterial>>();
+            .init_resource::<TerrainPipeline<TerrainMaterialBaseLayer>>();
     }
 }
 
 pub fn bind_terrain_material(
-    mut pipeline: ResMut<TerrainPipeline<TerrainBaseMaterial>>,
+    mut pipeline: ResMut<TerrainPipeline<TerrainMaterialBaseLayer>>,
     render_device: Res<RenderDevice>,
-    mut param: StaticSystemParam<<TerrainBaseMaterial as AsBindGroup>::Param>,
+    mut param: StaticSystemParam<<TerrainMaterialBaseLayer as AsBindGroup>::Param>,
 ) {
     trace!("Binding terrain material");
     // Already prepared
